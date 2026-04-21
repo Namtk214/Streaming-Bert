@@ -97,8 +97,8 @@ python train.py
 from infer_stream import StreamingInferenceEngine
 
 engine = StreamingInferenceEngine(
-    model_path="streaming/outputs/best_model",
-    vncorenlp_dir="vncorenlp",   # optional
+    model_path="outputs/best_model",  # Chỉnh lại đường dẫn nếu chạy từ thư mục khác
+    vncorenlp_dir="vncorenlp",        # optional
     threshold=0.5,
 )
 
