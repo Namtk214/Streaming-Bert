@@ -32,6 +32,12 @@ if _streaming_dir not in sys.path:
 from config import StreamingConfig, SPEAKER_MAP
 from model import StreamingScamDetector
 
+# [Fix] Allowed safe globals cho PyTorch 2.6+ trên Colab (nơi ép weights_only=True)
+try:
+    torch.serialization.add_safe_globals([StreamingConfig])
+except AttributeError:
+    pass
+
 
 class StreamingInferenceEngine:
     """
