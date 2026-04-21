@@ -333,7 +333,12 @@ def create_app(engine: StreamingInferenceEngine):
             secondary_hue="green",
         ),
         css="""
-        .gradio-container { max-width: 900px !important; }
+        .gradio-container {
+            max-width: 960px !important;
+            margin-left: auto !important;
+            margin-right: auto !important;
+        }
+        .main { display: flex; justify-content: center; }
         .result-panel { min-height: 200px; }
         """
     ) as app:
