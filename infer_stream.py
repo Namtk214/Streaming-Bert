@@ -194,7 +194,7 @@ class StreamingInferenceEngine:
             "probability": round(prob, 4),
             "is_scam": bool(is_scam),
             "speaker": speaker,
-            "text_preview": text[:50],
+            "text_preview": text,
         }
 
     def predict_conversation(self, messages: list, dialogue_id: str = "temp") -> list:
