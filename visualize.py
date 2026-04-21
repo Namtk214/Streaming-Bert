@@ -333,115 +333,134 @@ def create_app(engine: StreamingInferenceEngine):
             secondary_hue="green",
         ),
         css="""
+        body, gradio-app {
+            background: #f8fafc;
+        }
         .gradio-container {
-            max-width: 960px !important;
+            max-width: 100% !important;
+            width: 100% !important;
+            margin: 0 !important;
+            padding: 0 !important;
+        }
+        #app-shell {
+            max-width: 1180px !important;
+            width: calc(100% - 48px) !important;
+            margin-left: auto !important;
+            margin-right: auto !important;
+            padding: 32px 0 48px;
+        }
+        #app-shell > .form, #app-shell .tabs {
+            width: 100%;
+        }
+        .main, .wrap, .contain {
+            max-width: 1180px !important;
             margin-left: auto !important;
             margin-right: auto !important;
         }
-        .main { display: flex; justify-content: center; }
         .result-panel { min-height: 200px; }
         """
     ) as app:
-        gr.Markdown("""
-        # Streaming Scam Detection
-        **PhoBERT + GRU** - Phat hien lua dao theo thoi gian thuc
+        with gr.Column(elem_id="app-shell"):
+            gr.Markdown("""
+            # Streaming Scam Detection
+            **PhoBERT + GRU** - Phat hien lua dao theo thoi gian thuc
 
-        Model phan tich tung turn hoi thoai va dua ra xac suat scam.
-        """)
+            Model phan tich tung turn hoi thoai va dua ra xac suat scam.
+            """)
 
-        with gr.Tabs():
-            # ── Tab 1: Chat Mode ──
-            with gr.Tab("Chat Mode"):
-                gr.Markdown("Nhap tung turn de mo phong hoi thoai streaming.")
+            with gr.Tabs():
+                # ── Tab 1: Chat Mode ──
+                with gr.Tab("Chat Mode"):
+                    gr.Markdown("Nhap tung turn de mo phong hoi thoai streaming.")
 
-                with gr.Row():
-                    with gr.Column(scale=1):
-                        chatbot = gr.Chatbot(label="Hoi thoai", height=350)
-                        with gr.Row():
-                            chat_input = gr.Textbox(
-                                label="Nhap noi dung turn",
-                                placeholder="Nhap text...",
-                                scale=3,
+                    with gr.Row():
+                        with gr.Column(scale=1):
+                            chatbot = gr.Chatbot(label="Hoi thoai", height=350)
+                            with gr.Row():
+                                chat_input = gr.Textbox(
+                                    label="Nhap noi dung turn",
+                                    placeholder="Nhap text...",
+                                    scale=3,
+                                )
+                                chat_speaker = gr.Radio(
+                                    ["normal", "scammer"],
+                                    value="normal",
+                                    label="Speaker",
+                                    scale=1,
+                                )
+                            with gr.Row():
+                                send_btn = gr.Button("Gui turn", variant="primary")
+                                reset_btn = gr.Button("Reset", variant="secondary")
+
+                        with gr.Column(scale=1):
+                            chat_detail = gr.HTML(label="Chi tiet", elem_classes="result-panel")
+                            chat_chart = gr.HTML(label="Timeline")
+
+                    chat_state = gr.State(None)
+
+                    send_btn.click(
+                        chat_step,
+                        [chat_input, chat_speaker, chatbot, chat_state],
+                        [chatbot, chat_state, chat_detail, chat_chart],
+                    ).then(lambda: "", None, chat_input)
+
+                    chat_input.submit(
+                        chat_step,
+                        [chat_input, chat_speaker, chatbot, chat_state],
+                        [chatbot, chat_state, chat_detail, chat_chart],
+                    ).then(lambda: "", None, chat_input)
+
+                    reset_btn.click(reset_chat, None, [chatbot, chat_state, chat_detail, chat_chart])
+
+                # ── Tab 2: Batch Mode ──
+                with gr.Tab("Batch Mode"):
+                    gr.Markdown("Paste ca hoi thoai (moi dong = 1 turn), chon speaker pattern.")
+
+                    with gr.Row():
+                        with gr.Column(scale=1):
+                            batch_input = gr.Textbox(
+                                label="Hoi thoai (moi dong = 1 turn)",
+                                placeholder="Alo ai day?\nToi la cong an...\nCai gi a?\nChuyen tien ngay!",
+                                lines=8,
                             )
-                            chat_speaker = gr.Radio(
-                                ["normal", "scammer"],
-                                value="normal",
-                                label="Speaker",
-                                scale=1,
+                            batch_speakers = gr.Textbox(
+                                label="Speaker pattern (lap lai theo vong)",
+                                value="normal, scammer",
+                                placeholder="normal, scammer",
                             )
-                        with gr.Row():
-                            send_btn = gr.Button("Gui turn", variant="primary")
-                            reset_btn = gr.Button("Reset", variant="secondary")
+                            analyze_btn = gr.Button("Phan tich", variant="primary")
 
-                    with gr.Column(scale=1):
-                        chat_detail = gr.HTML(label="Chi tiet", elem_classes="result-panel")
-                        chat_chart = gr.HTML(label="Timeline")
+                        with gr.Column(scale=1):
+                            batch_result = gr.HTML(label="Ket qua", elem_classes="result-panel")
+                            batch_chart = gr.HTML(label="Timeline")
 
-                chat_state = gr.State(None)
+                    analyze_btn.click(
+                        analyze_batch,
+                        [batch_input, batch_speakers],
+                        [batch_result, batch_chart],
+                    )
 
-                send_btn.click(
-                    chat_step,
-                    [chat_input, chat_speaker, chatbot, chat_state],
-                    [chatbot, chat_state, chat_detail, chat_chart],
-                ).then(lambda: "", None, chat_input)
+                # ── Tab 3: Examples ──
+                with gr.Tab("Preset Examples"):
+                    gr.Markdown("Chon vi du co san de test nhanh.")
 
-                chat_input.submit(
-                    chat_step,
-                    [chat_input, chat_speaker, chatbot, chat_state],
-                    [chatbot, chat_state, chat_detail, chat_chart],
-                ).then(lambda: "", None, chat_input)
+                    example_names = [e["name"] for e in SCAM_EXAMPLES + LEGIT_EXAMPLES]
+                    example_dropdown = gr.Dropdown(
+                        choices=example_names,
+                        label="Chon vi du",
+                        value=example_names[0],
+                    )
+                    run_example_btn = gr.Button("Chay", variant="primary")
 
-                reset_btn.click(reset_chat, None, [chatbot, chat_state, chat_detail, chat_chart])
+                    example_result = gr.HTML(label="Ket qua")
+                    example_chart = gr.HTML(label="Timeline")
+                    example_text = gr.Textbox(label="Raw text", lines=4, interactive=False)
 
-            # ── Tab 2: Batch Mode ──
-            with gr.Tab("Batch Mode"):
-                gr.Markdown("Paste ca hoi thoai (moi dong = 1 turn), chon speaker pattern.")
-
-                with gr.Row():
-                    with gr.Column(scale=1):
-                        batch_input = gr.Textbox(
-                            label="Hoi thoai (moi dong = 1 turn)",
-                            placeholder="Alo ai day?\nToi la cong an...\nCai gi a?\nChuyen tien ngay!",
-                            lines=8,
-                        )
-                        batch_speakers = gr.Textbox(
-                            label="Speaker pattern (lap lai theo vong)",
-                            value="normal, scammer",
-                            placeholder="normal, scammer",
-                        )
-                        analyze_btn = gr.Button("Phan tich", variant="primary")
-
-                    with gr.Column(scale=1):
-                        batch_result = gr.HTML(label="Ket qua", elem_classes="result-panel")
-                        batch_chart = gr.HTML(label="Timeline")
-
-                analyze_btn.click(
-                    analyze_batch,
-                    [batch_input, batch_speakers],
-                    [batch_result, batch_chart],
-                )
-
-            # ── Tab 3: Examples ──
-            with gr.Tab("Preset Examples"):
-                gr.Markdown("Chon vi du co san de test nhanh.")
-
-                example_names = [e["name"] for e in SCAM_EXAMPLES + LEGIT_EXAMPLES]
-                example_dropdown = gr.Dropdown(
-                    choices=example_names,
-                    label="Chon vi du",
-                    value=example_names[0],
-                )
-                run_example_btn = gr.Button("Chay", variant="primary")
-
-                example_result = gr.HTML(label="Ket qua")
-                example_chart = gr.HTML(label="Timeline")
-                example_text = gr.Textbox(label="Raw text", lines=4, interactive=False)
-
-                run_example_btn.click(
-                    run_example,
-                    [example_dropdown],
-                    [example_result, example_chart, example_text],
-                )
+                    run_example_btn.click(
+                        run_example,
+                        [example_dropdown],
+                        [example_result, example_chart, example_text],
+                    )
 
     return app
 
