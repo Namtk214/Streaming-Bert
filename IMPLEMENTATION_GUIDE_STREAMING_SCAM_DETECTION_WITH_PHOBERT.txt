@@ -1,0 +1,667 @@
+IMPLEMENTATION_GUIDE_STREAMING_SCAM_DETECTION_WITH_PHOBERT.txt
+
+Mục tiêu
+- Xây dựng hệ thống scam detection / tactic classification theo dạng streaming.
+- Input đi vào theo từng turn của hội thoại.
+- Sau mỗi turn mới, model phải cập nhật trạng thái hội thoại và đưa ra dự đoán mới.
+- Không dùng cả cuộc hội thoại dài làm input duy nhất cho PhoBERT.
+
+==================================================
+1. BÀI TOÁN CẦN ĐỊNH NGHĨA RÕ
+==================================================
+
+Bài toán đề xuất:
+- Ở thời điểm t, quan sát được prefix H_t = (u_1, u_2, ..., u_t)
+- Model cần dự đoán y_t dựa trên toàn bộ prefix hiện có
+- Model không được nhìn các turn tương lai
+
+Nhãn:
+
+ Binary streaming scam detection
+- y_t = 0/1
+- Ý nghĩa: tới turn t, hội thoại đã đủ bằng chứng là scam chưa?
+
+
+Khuyến nghị:
+- Nếu mục tiêu chính là cảnh báo sớm, ưu tiên binary detection theo prefix
+
+
+==================================================
+2. KIẾN TRÚC NÊN DÙNG
+==================================================
+
+Kiến trúc tổng thể:
+
+turn text u_t
+   -> PhoBERT turn encoder
+   -> turn embedding e_t
+   -> speaker embedding (optional)
+   -> uni-GRU / uni-LSTM
+   -> hidden state h_t
+   -> classifier
+   -> prediction y_hat_t
+
+Biểu diễn toán học:
+
+e_t = TurnEncoder(u_t)
+x_t = [e_t ; a_t]                     # a_t là speaker embedding nếu có
+h_t = RNN(x_t, h_{t-1})
+y_hat_t = Head(h_t)
+
+Trong đó:
+- TurnEncoder = PhoBERT pretrained
+- RNN = GRU hoặc LSTM 1 chiều
+- Head = linear layer cho binary hoặc multi-label
+
+Tại sao không đưa cả hội thoại vào PhoBERT?
+- Hội thoại dài dễ vượt giới hạn chiều dài đầu vào
+- Bài toán là streaming nên cần lưu state theo thời gian
+- Dùng PhoBERT cho từng turn sẽ hợp logic hơn và rẻ hơn khi inference online
+
+==================================================
+3. TẠI SAO CHỌN PHOBERT PRETRAINED
+==================================================
+
+PhoBERT là encoder tiếng Việt pretrained, phù hợp để:
+- lấy embedding ngữ nghĩa tốt cho từng turn
+- tận dụng tri thức ngôn ngữ có sẵn
+- giảm dữ liệu và compute so với train từ đầu
+
+Lưu ý thực tế:
+- PhoBERT nên được dùng như turn encoder
+- Nên word-segment tiếng Việt trước khi tokenize
+- Turn quá dài thì truncate theo max_length phù hợp
+
+==================================================
+4. FORMAT DỮ LIỆU JSON NÊN THIẾT KẾ
+==================================================
+
+Mỗi hội thoại nên là một object:
+
+{
+  "dialogue_id": "dlg_0001",
+  "conversation_label": 1,
+  "turns": [
+    {
+      "turn_id": 1,
+      "speaker": "victim",
+      "text": "Alo ai đấy?",
+      "scam_label": 0,
+      "tactic_labels": []
+    },
+    {
+      "turn_id": 2,
+      "speaker": "scammer",
+      "text": "Tôi là công an, anh đang liên quan đến một vụ án.",
+      "scam_label": 1,
+      "tactic_labels": ["impersonation_police", "threat"]
+    }
+  ]
+}
+
+
+==================================================
+5. SPEAKER INFORMATION
+==================================================
+
+Nên giữ speaker vì rất hữu ích cho hội thoại lừa đảo.
+
+Gợi ý encoding:
+- victim -> 0
+- scammer -> 1
+- system / unknown -> 2
+
+Sau đó:
+- dùng nn.Embedding(num_speakers, d_speaker)
+- concat speaker embedding với turn embedding trước khi đưa vào RNN
+
+x_t = concat(e_t, speaker_emb_t)
+
+Nếu dataset không chắc speaker role:
+- vẫn nên giữ speaker_id theo lượt nói A/B
+- chỉ cần model biết đang đổi người nói
+
+==================================================
+6. TURN ENCODER BẰNG PHOBERT
+==================================================
+
+Đầu vào 1 turn:
+- text của turn hiện tại
+- tokenize riêng từng turn
+- attention_mask riêng từng turn
+
+Turn embedding e_t có thể lấy theo 1 trong 3 cách:
+
+Cách 1: CLS-like pooling
+- lấy hidden state của token đầu tiên
+- đơn giản, nhanh
+
+Cách 2: masked mean pooling
+- lấy trung bình hidden states theo attention_mask
+- thường ổn định hơn
+
+Cách 3: attention pooling
+- thêm 1 tầng attention nhỏ để học pooling
+- mạnh hơn nhưng phức tạp hơn
+
+Khuyến nghị triển khai ban đầu:
+- dùng masked mean pooling
+
+==================================================
+7. CONVERSATION ENCODER
+==================================================
+
+Nên dùng:
+- uni-GRU trước
+- nếu cần mới thử uni-LSTM
+
+Lý do:
+- GRU nhẹ hơn
+- dễ train hơn
+- phù hợp streaming online
+
+Thiết lập ban đầu khuyến nghị:
+- hidden_size: 256 hoặc 384
+- num_layers: 1 hoặc 2
+- bidirectional = False
+- dropout: 0.1 đến 0.3
+
+Không nên dùng BiLSTM ở tầng hội thoại nếu muốn mô phỏng inference streaming thật sự,
+vì BiLSTM sẽ dùng thông tin từ tương lai trong training.
+
+==================================================
+8. ĐẦU RA MODEL
+==================================================
+
+ Binary scam detection
+- classifier_binary: Linear(hidden_dim, 1)
+- logits_binary shape: [B, T]
+- loss: BCEWithLogitsLoss
+
+
+
+==================================================
+9. NHÃN THEO THỜI GIAN
+==================================================
+
+Đây là phần rất quan trọng.
+
+Nếu mục tiêu là phát hiện scam càng sớm càng tốt:
+- label nên gán theo prefix
+- ví dụ:
+  [0, 0, 0, 1, 1, 1, 1]
+
+Tức là từ turn 4 trở đi đã đủ tín hiệu để cảnh báo.
+
+Nếu mục tiêu là tactic theo turn:
+- mỗi turn có vector nhãn riêng
+- turn nào không có tactic thì vector toàn 0
+
+Không nên chỉ gán 1 nhãn ở cuối hội thoại nếu muốn model học online tốt.
+
+==================================================
+10. TRAINING FLOW
+==================================================
+
+Một batch gồm N hội thoại.
+Mỗi hội thoại có độ dài turn khác nhau.
+
+Bước 1: tokenize từng turn
+- với mỗi dialogue, tokenize từng turn riêng
+- thu được input_ids[t], attention_mask[t]
+
+Bước 2: chạy PhoBERT trên từng turn
+- turn t -> last_hidden_state
+- pooling -> e_t
+
+Bước 3: chạy RNN theo trục thời gian turn
+- e_1, e_2, ..., e_T
+- update hidden state h_t
+
+Bước 4: tính logits tại mỗi turn
+- binary logits hoặc tactic logits
+
+Bước 5: tính loss có mask
+- do mỗi dialogue dài khác nhau nên cần turn_mask
+- chỉ tính loss ở các turn thật, bỏ turn padding
+
+Công thức:
+L = sum_t mask_t * w_t * loss_t / sum_t mask_t
+
+Trong đó:
+- mask_t = 1 nếu turn thật
+- w_t = temporal weight nếu muốn ưu tiên một số vùng thời gian
+
+==================================================
+11. INFERENCE FLOW
+==================================================
+
+Inference online cho 1 dialogue mới:
+
+Khởi tạo:
+- hidden state h_0 = 0
+- cache theo dialogue_id
+
+Khi turn mới tới:
+1) preprocess + word segmentation
+2) tokenize turn hiện tại
+3) chạy PhoBERT -> e_t
+4) concat speaker embedding nếu có
+5) update hidden state:
+   h_t = RNN(x_t, h_{t-1})
+6) classifier(h_t) -> logits_t
+7) sigmoid -> probability
+8) threshold -> quyết định cảnh báo hay không
+9) lưu lại hidden state mới vào cache
+
+Điểm mấu chốt:
+- inference không update gradient
+- chỉ forward và giữ hidden state
+
+==================================================
+12. NÊN UPDATE THAM SỐ NÀO
+==================================================
+
+Khuyến nghị chia thành 3 stage.
+
+Stage A: Freeze PhoBERT hoàn toàn
+Train:
+- speaker embedding
+- pooling layer nếu có
+- GRU/LSTM
+- classifier head
+
+Mục tiêu:
+- kiểm tra pipeline streaming có chạy ổn không
+- lấy baseline nhanh và ổn định
+
+Stage B: Unfreeze top 2 PhoBERT layers
+Train:
+- top 2 transformer blocks của PhoBERT
+- GRU/LSTM
+- classifier
+
+Mục tiêu:
+- cho encoder thích nghi dần với domain scam dialogue
+
+Stage C: Unfreeze top 4 PhoBERT layers
+Chỉ làm nếu validation còn tăng.
+
+Không khuyến nghị:
+- full fine-tune toàn bộ PhoBERT ngay từ đầu
+
+==================================================
+13. PARAM GROUPS VÀ LEARNING RATE
+==================================================
+
+Nên dùng LR khác nhau cho pretrained encoder và phần mới thêm.
+
+Khuyến nghị:
+- PhoBERT top layers: 1e-5 đến 2e-5
+- GRU/LSTM + classifier: 5e-5 đến 2e-4
+
+Ví dụ:
+optimizer param groups:
+- group 1: encoder_top_layers, lr = 1e-5
+- group 2: rnn + heads, lr = 1e-4
+
+Weight decay:
+- 0.01 là điểm bắt đầu tốt
+
+Gradient clipping:
+- 1.0
+
+Scheduler:
+- linear warmup hoặc cosine
+- warmup_ratio: 0.05 đến 0.1
+
+==================================================
+14. BATCHING VÀ PADDING
+==================================================
+
+Mỗi sample là một dialogue.
+Mỗi dialogue có:
+- số turn khác nhau
+- mỗi turn có số token khác nhau
+
+Do đó có 2 mức padding:
+1) padding token trong từng turn
+2) padding số turn giữa các dialogues
+
+Triển khai thực tế:
+- token-level pad cho từng turn tới max_token_len
+- dialogue-level pad tới max_num_turns trong batch
+- tạo turn_mask để chỉ ra turn nào là thật
+
+Tensor có thể tổ chức như:
+input_ids:      [B, T, L]
+attention_mask: [B, T, L]
+speaker_ids:    [B, T]
+turn_mask:      [B, T]
+labels:         [B, T, C] hoặc [B, T]
+
+Forward:
+- reshape [B, T, L] -> [B*T, L]
+- chạy PhoBERT một lượt lớn
+- pooling -> [B*T, H]
+- reshape lại -> [B, T, H]
+- chạy RNN theo chiều T
+
+==================================================
+15. LOSS MASKING
+==================================================
+
+Vì có padding theo turn, bắt buộc phải mask loss.
+
+Ví dụ binary:
+- logits shape [B, T]
+- labels shape [B, T]
+- mask shape [B, T]
+
+Pseudo:
+loss_raw = BCEWithLogitsLoss(reduction="none")(logits, labels.float())
+loss = (loss_raw * turn_mask).sum() / turn_mask.sum()
+
+Ví dụ multi-label:
+- logits shape [B, T, C]
+- labels shape [B, T, C]
+- turn_mask mở rộng thành [B, T, 1]
+
+loss_raw = BCEWithLogitsLoss(reduction="none")(logits, labels.float())
+loss = (loss_raw * turn_mask.unsqueeze(-1)).sum() / (turn_mask.sum() * C)
+
+==================================================
+16. METRICS NÊN LOG
+==================================================
+
+Binary detection:
+- loss train / val
+- accuracy
+- precision
+- recall
+- F1
+- AUROC
+- early detection delay nếu định nghĩa được
+
+
+
+Streaming-specific:
+- first-alert turn
+- average delay to first correct alert
+- false alarm rate before scam onset
+
+Rất nên log thêm:
+- positive rate predicted per batch
+
+
+==================================================
+17. THRESHOLDING
+==================================================
+
+Với BCEWithLogitsLoss:
+- lúc train dùng logits trực tiếp
+- lúc infer mới sigmoid
+
+Không nên fix threshold = 0.5 ngay từ đầu cho mọi nhãn.
+Nên tune threshold trên validation set.
+
+Có 2 cách:
+1) 1 threshold chung cho tất cả nhãn
+2) 1 threshold riêng cho từng nhãn
+
+Với 40 nhãn mất cân bằng:
+- threshold riêng từng nhãn thường tốt hơn
+
+==================================================
+18. REGULARIZATION VÀ CHỐNG OVERFIT
+==================================================
+
+Khuyến nghị:
+- dropout ở head: 0.2 đến 0.3
+- dropout trong RNN nếu num_layers > 1
+- weight decay = 0.01
+- early stopping theo micro F1 hoặc AUROC
+
+Nếu dữ liệu nhỏ:
+- freeze nhiều tầng PhoBERT hơn
+- tăng regularization
+- giảm hidden size của RNN
+
+
+==================================================
+20. IMPLEMENTATION PLAN THEO THỨ TỰ
+==================================================
+
+Bước 1:
+- chuẩn hóa JSON schema
+- định nghĩa label2id cho 40 tactics
+
+Bước 2:
+- viết Dataset class trả về 1 dialogue mỗi sample
+
+Bước 3:
+- viết custom collate_fn
+- pad token level và turn level
+- tạo turn_mask
+
+Bước 4:
+- viết model:
+  PhoBERT encoder
+  pooling
+  speaker embedding
+  uni-GRU
+  classifier head
+
+Bước 5:
+- viết forward:
+  reshape B,T,L -> B*T,L
+  PhoBERT
+  pooling
+  reshape về B,T,H
+  concat speaker
+  GRU
+  classifier
+  masked loss
+
+Bước 6:
+- train Stage A: freeze PhoBERT
+
+Bước 7:
+- đánh giá metrics trên validation
+
+Bước 8:
+- train Stage B: unfreeze top 2 layers
+
+Bước 9:
+- threshold tuning trên validation
+
+Bước 10:
+- viết inference service:
+  cache hidden state theo dialogue_id
+  mỗi turn đến thì update state và predict
+
+==================================================
+21. CẤU TRÚC FILE GỢI Ý
+==================================================
+
+project/
+  data/
+    train.json
+    val.json
+    test.json
+    label_map.json
+
+  src/
+    dataset.py
+    collate.py
+    model.py
+    losses.py
+    metrics.py
+    train.py
+    eval.py
+    infer_stream.py
+    utils_text.py
+    config.py
+
+Gợi ý nội dung:
+- dataset.py: đọc JSON dialogue
+- collate.py: padding 2 cấp
+- model.py: PhoBERT + GRU + heads
+- train.py: training loop
+- infer_stream.py: stateful online inference
+- utils_text.py: word segmentation, normalize text
+
+==================================================
+22. PSEUDOCODE MODEL FORWARD
+==================================================
+
+Input:
+- input_ids [B, T, L]
+- attention_mask [B, T, L]
+- speaker_ids [B, T]
+- turn_mask [B, T]
+- labels optional
+
+Forward:
+1) flatten turns:
+   input_ids_flat = input_ids.view(B*T, L)
+   attention_mask_flat = attention_mask.view(B*T, L)
+
+2) PhoBERT:
+   outputs = encoder(input_ids_flat, attention_mask_flat)
+   token_hidden = outputs.last_hidden_state
+
+3) pooling:
+   e_flat = masked_mean_pool(token_hidden, attention_mask_flat)
+
+4) reshape:
+   e = e_flat.view(B, T, H)
+
+5) speaker:
+   s = speaker_embedding(speaker_ids)
+   x = concat(e, s)
+
+6) RNN:
+   rnn_out, h_last = gru(x)
+
+7) classifier:
+   logits = head(rnn_out)
+
+8) loss:
+   masked BCE / CE theo turn_mask
+
+==================================================
+23. PSEUDOCODE STREAMING INFERENCE
+==================================================
+
+state_cache = {}
+
+def predict_one_turn(dialogue_id, text, speaker):
+    if dialogue_id not in state_cache:
+        h_prev = zero_state()
+    else:
+        h_prev = state_cache[dialogue_id]
+
+    text = preprocess(text)
+    text = word_segment(text)
+    inputs = tokenizer(text)
+
+    e_t = encode_turn_with_phobert(inputs)
+    s_t = speaker_embedding(speaker)
+    x_t = concat(e_t, s_t)
+
+    h_t = gru_step(x_t, h_prev)
+    logits = classifier(h_t)
+    probs = sigmoid(logits)
+
+    state_cache[dialogue_id] = h_t
+    return probs
+
+==================================================
+24. CÁC LỖI THƯỜNG GẶP
+==================================================
+
+1) Dùng BiLSTM ở conversation level
+- gây leak thông tin tương lai
+
+2) Không mask loss ở turn padding
+- làm metric và loss sai
+
+3) Dùng label integer cho multi-label
+- sai format
+- phải là multi-hot vector float
+
+4) Dùng chung LR cao cho cả PhoBERT
+- dễ làm pretrained encoder hỏng
+
+5) Không segment tiếng Việt trước
+- làm giảm chất lượng PhoBERT
+
+6) Chỉ đánh giá ở cuối hội thoại
+- không phản ánh đúng năng lực streaming
+
+==================================================
+25. THIẾT LẬP BAN ĐẦU KHUYẾN NGHỊ
+==================================================
+
+Model:
+- PhoBERT-base-v2 pretrained
+- pooling: masked mean
+- speaker embedding dim: 16 hoặc 32
+- GRU hidden size: 256
+- GRU layers: 1
+- dropout: 0.2
+
+Training:
+- batch size theo số dialogues: tùy GPU
+- max_turns_per_dialogue: pad theo batch
+- max_tokens_per_turn: 64 hoặc 128 trước, rồi tăng nếu cần
+- optimizer: AdamW
+- encoder lr: 1e-5
+- rnn/head lr: 1e-4
+- weight decay: 0.01
+- grad clip: 1.0
+- warmup ratio: 0.1
+
+Stage schedule:
+- epoch 1-3: freeze PhoBERT
+- epoch 4-6: unfreeze top 2 layers
+- epoch 7+: cân nhắc unfreeze top 4 layers nếu val tăng
+
+==================================================
+26. THỨ TỰ ƯU TIÊN THỰC HIỆN
+==================================================
+
+Ưu tiên 1:
+- chạy binary streaming detection trước
+- chỉ 1 head
+- freeze PhoBERT
+
+Ưu tiên 2:
+- thêm speaker embedding
+- thêm threshold tuning
+
+Ưu tiên 3:
+- unfreeze top PhoBERT layers
+
+
+==================================================
+27. CHỐT HƯỚNG NÊN LÀM
+==================================================
+
+Phiên bản nên implement đầu tiên:
+
+PhoBERT pretrained per-turn encoder
++ masked mean pooling
++ speaker embedding
++ uni-GRU
++ binary scam detection head
++ masked loss theo turn
++ inference giữ hidden state theo dialogue_id
+
+
+Kết luận:
+- PhoBERT nên dùng như turn encoder
+- context liên turn nên do uni-GRU/LSTM xử lý
+- training phải dùng nhãn theo thời điểm
+- inference phải lưu hidden state, không update gradient
