@@ -320,7 +320,10 @@ def train(cfg: StreamingConfig = None):
             save_path = os.path.join(cfg.output_dir, "best_model")
             os.makedirs(save_path, exist_ok=True)
             torch.save(model.state_dict(), os.path.join(save_path, "model.pt"))
-            torch.save(cfg, os.path.join(save_path, "config.pt"))
+            # Save config as JSON (compatible with PyTorch 2.6+ weights_only default)
+            import dataclasses
+            with open(os.path.join(save_path, "config.json"), "w") as f_cfg:
+                json.dump(dataclasses.asdict(cfg), f_cfg, indent=2)
             tokenizer.save_pretrained(save_path)
 
             # Save metrics
@@ -346,7 +349,7 @@ def train(cfg: StreamingConfig = None):
     # Load best model
     best_path = os.path.join(cfg.output_dir, "best_model", "model.pt")
     if os.path.exists(best_path):
-        model.load_state_dict(torch.load(best_path, map_location=device))
+        model.load_state_dict(torch.load(best_path, map_location=device, weights_only=True))
         print("  Loaded best model for final evaluation")
 
     # Test set

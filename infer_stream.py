@@ -54,10 +54,19 @@ class StreamingInferenceEngine:
         else:
             self.device = torch.device(device)
 
-        # Load config
-        config_path = os.path.join(model_path, "config.pt")
-        if os.path.exists(config_path):
-            self.config = torch.load(config_path, map_location="cpu")
+        # Load config (JSON format, compatible with PyTorch 2.6+)
+        config_json_path = os.path.join(model_path, "config.json")
+        config_pt_path = os.path.join(model_path, "config.pt")
+        if os.path.exists(config_json_path):
+            with open(config_json_path, "r") as f:
+                config_dict = json.load(f)
+            self.config = StreamingConfig(**{
+                k: v for k, v in config_dict.items()
+                if k in StreamingConfig.__dataclass_fields__
+            })
+        elif os.path.exists(config_pt_path):
+            # Fallback for old checkpoints saved with torch.save
+            self.config = torch.load(config_pt_path, map_location="cpu", weights_only=False)
         else:
             self.config = StreamingConfig()
 
@@ -71,7 +80,7 @@ class StreamingInferenceEngine:
         model_state = os.path.join(model_path, "model.pt")
         if os.path.exists(model_state):
             self.model.load_state_dict(
-                torch.load(model_state, map_location=self.device)
+                torch.load(model_state, map_location=self.device, weights_only=True)
             )
         self.model.to(self.device)
         self.model.eval()
