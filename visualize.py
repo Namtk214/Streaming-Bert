@@ -333,34 +333,15 @@ def create_app(engine: StreamingInferenceEngine):
             secondary_hue="green",
         ),
         css="""
-        body, gradio-app {
-            background: #f8fafc;
-        }
         .gradio-container {
-            max-width: 100% !important;
-            width: 100% !important;
-            margin: 0 !important;
-            padding: 0 !important;
-        }
-        #app-shell {
-            max-width: 1180px !important;
-            width: calc(100% - 48px) !important;
-            margin-left: auto !important;
-            margin-right: auto !important;
-            padding: 32px 0 48px;
-        }
-        #app-shell > .form, #app-shell .tabs {
-            width: 100%;
-        }
-        .main, .wrap, .contain {
-            max-width: 1180px !important;
+            max-width: 960px !important;
             margin-left: auto !important;
             margin-right: auto !important;
         }
         .result-panel { min-height: 200px; }
         """
     ) as app:
-        with gr.Column(elem_id="app-shell"):
+        with gr.Column():
             gr.Markdown("""
             # Streaming Scam Detection
             **PhoBERT + GRU** - Phat hien lua dao theo thoi gian thuc
