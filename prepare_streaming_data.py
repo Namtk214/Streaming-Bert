@@ -2,7 +2,7 @@
 Chuyển đổi raw conversations → streaming format cho training.
 
 Quy trình:
-  1. Đọc raw_conversations.json + synthetic_conversations.json
+  1. Đọc raw conversations JSON từ đường dẫn input
   2. Clean text + word segmentation (VnCoreNLP)
   3. Gán binary scam label theo prefix rule:
      - SCAM/AMBIGUOUS: label=1 từ turn scammer có tactic đầu tiên
@@ -23,6 +23,7 @@ Output format mỗi dialogue:
 
 import json
 import os
+import argparse
 import random
 import re
 import sys
@@ -203,31 +204,65 @@ def split_dialogues(
 # ============================================================
 # Main pipeline
 # ============================================================
-def main():
+def parse_args() -> argparse.Namespace:
     cfg = StreamingConfig()
+    parser = argparse.ArgumentParser(
+        description="Convert raw conversation JSON to Streaming-Bert train/val/test JSON files."
+    )
+    parser.add_argument(
+        "input_json",
+        nargs="?",
+        default=cfg.raw_data_path,
+        help="Path to raw conversations JSON. Defaults to config raw_data_path.",
+    )
+    parser.add_argument(
+        "--output-dir",
+        default=cfg.streaming_data_dir,
+        help="Output dataset folder containing train.json, val.json, and test.json.",
+    )
+    parser.add_argument(
+        "--vncorenlp-dir",
+        default=cfg.vncorenlp_dir,
+        help="VnCoreNLP model directory.",
+    )
+    parser.add_argument("--val-ratio", type=float, default=cfg.val_ratio)
+    parser.add_argument("--test-ratio", type=float, default=cfg.test_ratio)
+    parser.add_argument("--seed", type=int, default=cfg.seed)
+    return parser.parse_args()
+
+
+def load_conversations(input_json: str) -> List[Dict]:
+    if not os.path.exists(input_json):
+        raise FileNotFoundError(f"Input JSON not found: {input_json}")
+
+    with open(input_json, "r", encoding="utf-8") as f:
+        conversations = json.load(f)
+
+    if not isinstance(conversations, list):
+        raise ValueError("Input JSON must be a list of conversations.")
+
+    required_keys = {"conversation_id", "t1_label", "messages"}
+    for idx, conversation in enumerate(conversations):
+        missing = required_keys - set(conversation.keys())
+        if missing:
+            raise ValueError(
+                f"Conversation at index {idx} is missing keys: {sorted(missing)}"
+            )
+
+    return conversations
+
+
+def main():
+    args = parse_args()
 
     print("=" * 60)
     print("PREPARE STREAMING DATA")
     print("=" * 60)
 
     # ── 1. Đọc raw data ──
-    all_conversations = []
-
-    # Original data
-    if os.path.exists(cfg.raw_data_path):
-        with open(cfg.raw_data_path, "r", encoding="utf-8") as f:
-            original = json.load(f)
-        all_conversations.extend(original)
-        print(f"  Original data: {len(original)} conversations")
-
-    # Synthetic data
-    synth_path = os.path.join(cfg.streaming_data_dir, "synthetic_conversations.json")
-    if os.path.exists(synth_path):
-        with open(synth_path, "r", encoding="utf-8") as f:
-            synthetic = json.load(f)
-        all_conversations.extend(synthetic)
-        print(f"  Synthetic data: {len(synthetic)} conversations")
-
+    print(f"  Input JSON: {args.input_json}")
+    print(f"  Output dir: {args.output_dir}")
+    all_conversations = load_conversations(args.input_json)
     print(f"  Total: {len(all_conversations)} conversations")
 
     # Thống kê
@@ -237,7 +272,7 @@ def main():
 
     # ── 2. Word segmentation ──
     print("\nInitializing word segmenter...")
-    segmenter = WordSegmenter(cfg.vncorenlp_dir)
+    segmenter = WordSegmenter(args.vncorenlp_dir)
 
     # ── 3. Convert to streaming format ──
     print("\nConverting to streaming format...")
@@ -252,7 +287,7 @@ def main():
     # ── 4. Split ──
     print("\nSplitting data...")
     train, val, test = split_dialogues(
-        streaming_dialogues, cfg.val_ratio, cfg.test_ratio, cfg.seed
+        streaming_dialogues, args.val_ratio, args.test_ratio, args.seed
     )
     print(f"  Train: {len(train)} | Val: {len(val)} | Test: {len(test)}")
 
@@ -263,10 +298,10 @@ def main():
         print(f"    {name}: {counts}")
 
     # ── 5. Lưu ──
-    os.makedirs(cfg.streaming_data_dir, exist_ok=True)
+    os.makedirs(args.output_dir, exist_ok=True)
 
     for split_name, split_data in [("train", train), ("val", val), ("test", test)]:
-        path = os.path.join(cfg.streaming_data_dir, f"{split_name}.json")
+        path = os.path.join(args.output_dir, f"{split_name}.json")
         with open(path, "w", encoding="utf-8") as f:
             json.dump(split_data, f, ensure_ascii=False, indent=2)
         print(f"  Saved {split_name}: {path}")

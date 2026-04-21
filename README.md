@@ -23,11 +23,12 @@ turn text u_t
 ## Cấu trúc thư mục
 
 ```
-streaming/
+Streaming-Bert/
 ├── README.md
 ├── config.py                  # Cấu hình hyperparameters
 ├── generate_data.py           # Tạo dữ liệu synthetic để test
-├── prepare_streaming_data.py  # Chuyển raw JSON → streaming format
+├── prepare_excel_dataset.py   # Chuyển Excel → raw JSON + streaming dataset
+├── prepare_streaming_data.py  # Chuyển raw JSON → streaming dataset
 ├── dataset.py                 # Dataset + collate_fn (padding 2 cấp)
 ├── model.py                   # PhoBERT + GRU + binary head
 ├── metrics.py                 # Streaming metrics (F1, AUROC, delay...)
@@ -35,7 +36,7 @@ streaming/
 ├── infer_stream.py            # Stateful online inference
 ├── visualize.py               # Gradio demo UI
 ├── data/
-│   ├── synthetic_conversations.json  # Dữ liệu synthetic
+│   ├── excel_raw_conversations.json  # Raw JSON convert từ Excel
 │   ├── train.json                    # Training set (streaming format)
 │   ├── val.json                      # Validation set
 │   └── test.json                     # Test set
@@ -52,24 +53,25 @@ streaming/
 
 ```bash
 pip install torch transformers scikit-learn numpy py_vncorenlp gradio
+apt-get install -y default-jdk
+pip install py_vncorenlp
 ```
 
-### 2. Tạo dữ liệu test
+### 2. Chuẩn bị dữ liệu
 
 ```bash
-cd streaming
+cd Streaming-Bert
 
-# Tạo 40 hội thoại synthetic (20 scam + 5 ambiguous + 15 legit)
-python generate_data.py
 
-# Chuyển sang streaming format + chia train/val/test
-python prepare_streaming_data.py
+python prepare_streaming_data.py data/raw_conversations.json
 ```
 
 Output:
-- `data/train.json` (52 dialogues)
-- `data/val.json` (9 dialogues)
-- `data/test.json` (9 dialogues)
+- `data/raw_conversations.json` (raw JSON trung gian, nếu dùng Excel converter)
+- `data/train.json`
+- `data/val.json`
+- `data/test.json`
+
 
 ### 3. Training
 
@@ -83,6 +85,7 @@ python train.py --small
 # Full training (10 epochs, khuyến nghị chạy trên GPU)
 python train.py
 ```
+
 
 **Staged training:**
 
@@ -147,7 +150,7 @@ python visualize.py
 
 ### Input (raw conversations)
 
-Cùng format với `data/raw_conversations.json`:
+`prepare_streaming_data.py` nhận một file JSON là danh sách conversations. Với dữ liệu Excel đã convert, file raw trung gian là `data/excel_raw_conversations.json`.
 
 ```json
 {
@@ -236,27 +239,7 @@ Cùng format với `data/raw_conversations.json`:
 4. **Word segment tiếng Việt** trước khi tokenize — cải thiện chất lượng PhoBERT
 5. **Không fix threshold=0.5** — nên tune trên validation set
 
-## Khắc phục lỗi thường gặp (Troubleshooting)
 
-### Lỗi `UnpicklingError: Weights only load failed` trên Google Colab / PyTorch 2.6+
-Lỗi này xảy ra khi bạn load mô hình được train từ code cũ (lưu `config.pt` thay vì `config.json`) lên môi trường PyTorch 2.6 (ví dụ: Google Colab) với cơ chế bảo mật tự động chặn các file `.pt` chứa cấu trúc class Python.
 
-**Cách khắc phục:**
-- **Cách 1 (Khuyên dùng):** Xóa model cũ và chạy lại lệnh training (`python train.py`). Code mới nhất đã tự động chuyển sang lưu bằng `config.json` để hoàn toàn tương thích với cơ chế an toàn của PyTorch 2.6.
-- **Cách 2:** Thêm đoạn code sau vào đầu file Notebook trên Colab của bạn **trước** khi init engine:
-  ```python
-  import torch
-  from config import StreamingConfig
-  torch.serialization.add_safe_globals([StreamingConfig])
-  ```
 
-### VnCoreNLP không load được trên Google Colab
-Do JVM bị Jupyter kernel chiếm trước. Cách fix:
-```python
-# Chạy TRƯỚC mọi import khác (ô code đầu tiên)
-!apt-get install -y default-jdk
-!pip install py_vncorenlp
-import py_vncorenlp
-py_vncorenlp.download_model(save_dir='vncorenlp')
-```
-Sau đó restart runtime rồi chạy lại. Nếu vẫn lỗi, model sẽ tự fallback dùng raw text (chất lượng giảm nhẹ ~5-10% F1).
+

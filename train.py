@@ -21,6 +21,7 @@ import os
 import random
 import sys
 import time
+import argparse
 
 import numpy as np
 import torch
@@ -368,18 +369,35 @@ def train(cfg: StreamingConfig = None):
 
 
 # ============================================================
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Train Streaming-Bert from the prepared dataset folder in config.py."
+    )
+    parser.add_argument(
+        "--output-dir",
+        default=None,
+        help="Folder for training outputs. Defaults to config output_dir.",
+    )
+    parser.add_argument("--debug", action="store_true", help="2 epochs, batch_size=2")
+    parser.add_argument("--small", action="store_true", help="5 epochs, batch_size=2")
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
     cfg = StreamingConfig()
+    args = parse_args()
 
-    # Parse CLI args
-    if "--debug" in sys.argv:
+    if args.output_dir:
+        cfg.output_dir = args.output_dir
+
+    if args.debug:
         cfg.num_epochs = 2
         cfg.batch_size = 2
         cfg.stage_a_epochs = 1
         cfg.stage_b_epochs = 1
         print("  DEBUG MODE: 2 epochs, batch_size=2")
 
-    if "--small" in sys.argv:
+    if args.small:
         cfg.batch_size = 2
         cfg.num_epochs = 5
         print("  SMALL MODE: batch_size=2, 5 epochs")
