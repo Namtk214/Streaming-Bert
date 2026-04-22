@@ -51,9 +51,6 @@ class StreamingScamDetector(nn.Module):
         # Loss function
         self.loss_fn = nn.BCEWithLogitsLoss(reduction="none")
 
-    # ──────────────────────────────────────────────
-    # Pooling
-    # ──────────────────────────────────────────────
     def masked_mean_pool(self, token_hidden, attention_mask):
         """
         Masked mean pooling trên chiều token.
@@ -74,9 +71,6 @@ class StreamingScamDetector(nn.Module):
         sum_mask = mask_expanded.sum(dim=1).clamp(min=1e-9)        # [N, 1]
         return sum_hidden / sum_mask
 
-    # ──────────────────────────────────────────────
-    # Forward (training – full batch)
-    # ──────────────────────────────────────────────
     def forward(self, input_ids, attention_mask,
                 turn_mask, labels=None):
         """
@@ -130,9 +124,6 @@ class StreamingScamDetector(nn.Module):
 
         return {"loss": loss, "logits": logits}
 
-    # ──────────────────────────────────────────────
-    # Inference (single turn – streaming)
-    # ──────────────────────────────────────────────
     def encode_single_turn(self, input_ids, attention_mask, h_prev=None):
         """
         Encode 1 turn mới và update hidden state.
@@ -172,32 +163,6 @@ class StreamingScamDetector(nn.Module):
             logits = self.classifier(rnn_out.squeeze(1))        # [1, 1]
 
         return logits.item(), h_new
-
-    # ──────────────────────────────────────────────
-    # Freeze / Unfreeze helpers
-    # ──────────────────────────────────────────────
-    def freeze_encoder(self):
-        """Freeze toàn bộ PhoBERT parameters."""
-        for param in self.encoder.parameters():
-            param.requires_grad = False
-        print("  [Model] PhoBERT encoder FROZEN")
-
-    def unfreeze_top_layers(self, n: int = 2):
-        """Unfreeze top n transformer layers của PhoBERT."""
-        # Freeze tất cả trước
-        self.freeze_encoder()
-        # Unfreeze top n layers
-        total_layers = len(self.encoder.encoder.layer)
-        for i in range(total_layers - n, total_layers):
-            for param in self.encoder.encoder.layer[i].parameters():
-                param.requires_grad = True
-        print(f"  [Model] PhoBERT top {n}/{total_layers} layers UNFROZEN")
-
-    def unfreeze_all(self):
-        """Unfreeze toàn bộ PhoBERT."""
-        for param in self.encoder.parameters():
-            param.requires_grad = True
-        print("  [Model] PhoBERT encoder fully UNFROZEN")
 
     def get_param_groups(self, encoder_lr: float, rnn_head_lr: float):
         """

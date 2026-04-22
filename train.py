@@ -97,36 +97,61 @@ def evaluate(model, dataloader, device, threshold=0.5):
 # Sample prediction preview
 # ============================================================
 @torch.no_grad()
-def preview_sample(model, dataloader, device, threshold=0.5):
-    """Lấy 1 sample từ dataloader, dự đoán và in kết quả."""
+def preview_sample(model, dataloader, device, threshold=0.5, max_samples=2):
+    """Random preview vài dialogue từ validation để tránh luôn nhìn cùng 1 mẫu."""
     model.eval()
-    batch = next(iter(dataloader))
-    batch = {k: v.to(device) for k, v in batch.items()}
+    dataset = dataloader.dataset
+    if len(dataset) == 0:
+        return
 
-    output = model(
-        input_ids=batch["input_ids"],
-        attention_mask=batch["attention_mask"],
-        turn_mask=batch["turn_mask"],
-    )
+    # Lấy ngẫu nhiên nhiều candidates để tăng khả năng có cả LEGIT và SCAM.
+    num_candidates = min(len(dataset), max(max_samples * 8, 8))
+    candidate_indices = random.sample(range(len(dataset)), num_candidates)
 
-    # Lấy dialogue đầu tiên
-    logits = output["logits"][0].cpu().numpy()
-    labels = batch["labels"][0].cpu().numpy()
-    mask = batch["turn_mask"][0].cpu().numpy()
-    valid_len = int(mask.sum())
+    selected_indices = []
+    selected_labels = set()
+    for idx in candidate_indices:
+        dlg_label = dataset.dialogues[idx].get("conversation_label", "UNKNOWN")
+        if dlg_label not in selected_labels or len(selected_indices) < max_samples:
+            selected_indices.append(idx)
+            selected_labels.add(dlg_label)
+        if len(selected_indices) >= max_samples and len(selected_labels) >= 2:
+            break
 
-    probs = 1 / (1 + np.exp(-logits[:valid_len]))
-    preds = (probs >= threshold).astype(int)
-    true = labels[:valid_len].astype(int)
+    selected_indices = selected_indices[:max_samples]
 
-    print(f"\n  -- Sample Preview --")
-    print(f"    Turn:  {list(range(1, valid_len + 1))}")
-    print(f"    True:  {true.tolist()}")
-    print(f"    Pred:  {preds.tolist()}")
-    print(f"    Probs: [{', '.join(f'{p:.2f}' for p in probs)}]")
+    print(f"\n  -- Random Validation Preview --")
+    for preview_idx, dataset_idx in enumerate(selected_indices, start=1):
+        item = dataset[dataset_idx]
+        batch = streaming_collate_fn([item])
+        batch = {k: v.to(device) for k, v in batch.items()}
 
-    match = "[OK]" if np.array_equal(preds, true) else "[X]"
-    print(f"    Match: {match}")
+        output = model(
+            input_ids=batch["input_ids"],
+            attention_mask=batch["attention_mask"],
+            turn_mask=batch["turn_mask"],
+        )
+
+        logits = output["logits"][0].cpu().numpy()
+        labels = batch["labels"][0].cpu().numpy()
+        mask = batch["turn_mask"][0].cpu().numpy()
+        valid_len = int(mask.sum())
+
+        probs = 1 / (1 + np.exp(-logits[:valid_len]))
+        preds = (probs >= threshold).astype(int)
+        true = labels[:valid_len].astype(int)
+
+        dialogue = dataset.dialogues[dataset_idx]
+        match = "[OK]" if np.array_equal(preds, true) else "[X]"
+        print(
+            f"    Sample {preview_idx}: idx={dataset_idx} "
+            f"id={dialogue.get('dialogue_id')} "
+            f"label={dialogue.get('conversation_label')} {match}"
+        )
+        print(f"      Turn:  {list(range(1, valid_len + 1))}")
+        print(f"      True:  {true.tolist()}")
+        print(f"      Pred:  {preds.tolist()}")
+        print(f"      Probs: [{', '.join(f'{p:.2f}' for p in probs)}]")
 
 
 # ============================================================
@@ -182,16 +207,12 @@ def train(cfg: StreamingConfig = None):
     # ── 3. Model ──
     print(f"\n  Loading model: {cfg.model_name}")
     model = StreamingScamDetector(cfg).to(device)
-
-    # Stage A: freeze encoder
-    model.freeze_encoder()
-    print(f"  Trainable params (Stage A): {model.count_trainable_params():,}")
+    print(f"  Trainable params: {model.count_trainable_params():,}")
 
     # ── 4. Optimizer + Scheduler ──
     total_steps = len(train_loader) * cfg.num_epochs
     warmup_steps = int(total_steps * cfg.warmup_ratio)
 
-    # Bắt đầu với chỉ RNN/head params (Stage A)
     param_groups = model.get_param_groups(cfg.encoder_lr, cfg.rnn_head_lr)
     optimizer = AdamW(
         param_groups,
@@ -211,46 +232,6 @@ def train(cfg: StreamingConfig = None):
 
     for epoch in range(1, cfg.num_epochs + 1):
         epoch_start = time.time()
-
-        # ── Stage management ──
-        if epoch == cfg.stage_a_epochs + 1:
-            # Stage B: unfreeze top 2 layers
-            print(f"\n{'='*60}")
-            print(f"  STAGE B: Unfreeze top 2 PhoBERT layers")
-            model.unfreeze_top_layers(2)
-            print(f"  Trainable params: {model.count_trainable_params():,}")
-
-            # Rebuild optimizer with encoder params
-            param_groups = model.get_param_groups(cfg.encoder_lr, cfg.rnn_head_lr)
-            optimizer = AdamW(
-                param_groups, weight_decay=cfg.weight_decay, eps=cfg.adam_epsilon,
-            )
-            remaining_steps = len(train_loader) * (cfg.num_epochs - epoch + 1)
-            warmup_steps_new = int(remaining_steps * 0.05)
-            scheduler = get_cosine_schedule_with_warmup(
-                optimizer, num_warmup_steps=warmup_steps_new,
-                num_training_steps=remaining_steps,
-            )
-            print(f"{'='*60}")
-
-        elif epoch == cfg.stage_a_epochs + cfg.stage_b_epochs + 1:
-            # Stage C: unfreeze top 4 layers
-            print(f"\n{'='*60}")
-            print(f"  STAGE C: Unfreeze top 4 PhoBERT layers")
-            model.unfreeze_top_layers(4)
-            print(f"  Trainable params: {model.count_trainable_params():,}")
-
-            param_groups = model.get_param_groups(cfg.encoder_lr, cfg.rnn_head_lr)
-            optimizer = AdamW(
-                param_groups, weight_decay=cfg.weight_decay, eps=cfg.adam_epsilon,
-            )
-            remaining_steps = len(train_loader) * (cfg.num_epochs - epoch + 1)
-            warmup_steps_new = int(remaining_steps * 0.05)
-            scheduler = get_cosine_schedule_with_warmup(
-                optimizer, num_warmup_steps=warmup_steps_new,
-                num_training_steps=remaining_steps,
-            )
-            print(f"{'='*60}")
 
         # ── Train epoch ──
         model.train()
