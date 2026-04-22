@@ -68,7 +68,6 @@ def evaluate(model, dataloader, device, threshold=0.5):
         output = model(
             input_ids=batch["input_ids"],
             attention_mask=batch["attention_mask"],
-            speaker_ids=batch["speaker_ids"],
             turn_mask=batch["turn_mask"],
             labels=batch["labels"],
         )
@@ -107,7 +106,6 @@ def preview_sample(model, dataloader, device, threshold=0.5):
     output = model(
         input_ids=batch["input_ids"],
         attention_mask=batch["attention_mask"],
-        speaker_ids=batch["speaker_ids"],
         turn_mask=batch["turn_mask"],
     )
 
@@ -265,7 +263,6 @@ def train(cfg: StreamingConfig = None):
             output = model(
                 input_ids=batch["input_ids"],
                 attention_mask=batch["attention_mask"],
-                speaker_ids=batch["speaker_ids"],
                 turn_mask=batch["turn_mask"],
                 labels=batch["labels"],
             )

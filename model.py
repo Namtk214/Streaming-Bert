@@ -5,13 +5,12 @@ Kiến trúc:
   turn text u_t
     → PhoBERT turn encoder
     → masked mean pooling → e_t (768-dim)
-    → concat speaker embedding → x_t (768 + speaker_dim)
     → uni-GRU → h_t (hidden_dim)
     → binary classifier → logits (1-dim)
 
 Forward (training):
   input_ids [B,T,L] → flatten [B*T,L] → PhoBERT → pool → [B,T,768]
-  concat speaker_emb → [B,T,784] → GRU → [B,T,256] → classifier → [B,T]
+  → GRU → [B,T,256] → classifier → [B,T]
   masked BCEWithLogitsLoss theo turn_mask
 
 Forward (inference):
@@ -34,13 +33,8 @@ class StreamingScamDetector(nn.Module):
         self.encoder = AutoModel.from_pretrained(config.model_name)
         self.encoder_hidden_size = self.encoder.config.hidden_size  # 768
 
-        # 2. Speaker embedding
-        self.speaker_embedding = nn.Embedding(
-            config.num_speakers, config.speaker_embed_dim
-        )
-
-        # 3. uni-GRU (conversation encoder)
-        gru_input_size = self.encoder_hidden_size + config.speaker_embed_dim
+        # 2. uni-GRU (conversation encoder)
+        gru_input_size = self.encoder_hidden_size
         self.gru = nn.GRU(
             input_size=gru_input_size,
             hidden_size=config.gru_hidden_size,
@@ -83,14 +77,13 @@ class StreamingScamDetector(nn.Module):
     # ──────────────────────────────────────────────
     # Forward (training – full batch)
     # ──────────────────────────────────────────────
-    def forward(self, input_ids, attention_mask, speaker_ids,
+    def forward(self, input_ids, attention_mask,
                 turn_mask, labels=None):
         """
         Parameters
         ----------
         input_ids      : [B, T, L]
         attention_mask  : [B, T, L]
-        speaker_ids     : [B, T]
         turn_mask       : [B, T]   – 1 = turn thật, 0 = padding
         labels          : [B, T]   – binary scam labels (optional)
 
@@ -113,13 +106,9 @@ class StreamingScamDetector(nn.Module):
 
         # ── 3. Masked mean pooling ──
         e_flat = self.masked_mean_pool(token_hidden, attention_mask_flat)  # [B*T, 768]
-        e = e_flat.view(B, T, -1)                            # [B, T, 768]
+        x = e_flat.view(B, T, -1)                            # [B, T, 768]
 
-        # ── 4. Speaker embedding ──
-        s = self.speaker_embedding(speaker_ids)               # [B, T, speaker_dim]
-        x = torch.cat([e, s], dim=-1)                         # [B, T, 768+speaker_dim]
-
-        # ── 5. GRU (packed sequence – skip padding turns) ──
+        # ── 4. GRU (packed sequence – skip padding turns) ──
         lengths = turn_mask.sum(dim=1).long().cpu()
         packed = nn.utils.rnn.pack_padded_sequence(
             x, lengths, batch_first=True, enforce_sorted=False
@@ -144,7 +133,7 @@ class StreamingScamDetector(nn.Module):
     # ──────────────────────────────────────────────
     # Inference (single turn – streaming)
     # ──────────────────────────────────────────────
-    def encode_single_turn(self, input_ids, attention_mask, speaker_id, h_prev=None):
+    def encode_single_turn(self, input_ids, attention_mask, h_prev=None):
         """
         Encode 1 turn mới và update hidden state.
 
@@ -152,7 +141,6 @@ class StreamingScamDetector(nn.Module):
         ----------
         input_ids      : [1, L]
         attention_mask  : [1, L]
-        speaker_id     : int
         h_prev         : [num_layers, 1, hidden] hoặc None
 
         Returns
@@ -170,10 +158,7 @@ class StreamingScamDetector(nn.Module):
             token_hidden = encoder_output.last_hidden_state    # [1, L, 768]
             e = self.masked_mean_pool(token_hidden, attention_mask)  # [1, 768]
 
-        # Speaker embedding
-        speaker_tensor = torch.tensor([speaker_id], dtype=torch.long, device=device)
-        s = self.speaker_embedding(speaker_tensor)             # [1, speaker_dim]
-        x = torch.cat([e, s], dim=-1).unsqueeze(1)             # [1, 1, input_dim]
+        x = e.unsqueeze(1)                                     # [1, 1, 768]
 
         # GRU step
         if h_prev is None:

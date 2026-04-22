@@ -21,7 +21,6 @@ class StreamingDialogueDataset(Dataset):
     Mỗi sample gồm:
     - input_ids [T, L]: token IDs cho từng turn
     - attention_mask [T, L]: attention mask cho từng turn
-    - speaker_ids [T]: speaker ID (0=normal, 1=scammer, 2=unknown)
     - labels [T]: binary scam label theo prefix rule
     - num_turns: số turn thật (dùng để tạo turn_mask khi collate)
     """
@@ -41,7 +40,6 @@ class StreamingDialogueDataset(Dataset):
 
         input_ids_list = []
         attention_mask_list = []
-        speaker_ids = []
         labels = []
 
         for turn in turns:
@@ -55,13 +53,11 @@ class StreamingDialogueDataset(Dataset):
             )
             input_ids_list.append(encoding["input_ids"].squeeze(0))
             attention_mask_list.append(encoding["attention_mask"].squeeze(0))
-            speaker_ids.append(turn["speaker"])
             labels.append(turn["scam_label"])
 
         return {
             "input_ids": torch.stack(input_ids_list),            # [T, L]
             "attention_mask": torch.stack(attention_mask_list),   # [T, L]
-            "speaker_ids": torch.tensor(speaker_ids, dtype=torch.long),  # [T]
             "labels": torch.tensor(labels, dtype=torch.float),   # [T]
             "num_turns": len(turns),
         }
@@ -78,7 +74,6 @@ def streaming_collate_fn(batch: List[Dict]) -> Dict[str, torch.Tensor]:
     Output tensors:
     - input_ids:      [B, T_max, L]
     - attention_mask:  [B, T_max, L]
-    - speaker_ids:     [B, T_max]
     - turn_mask:       [B, T_max]
     - labels:          [B, T_max]
     """
@@ -89,7 +84,6 @@ def streaming_collate_fn(batch: List[Dict]) -> Dict[str, torch.Tensor]:
     # Khởi tạo tensors với zeros (padding)
     input_ids = torch.zeros(B, max_turns, token_len, dtype=torch.long)
     attention_mask = torch.zeros(B, max_turns, token_len, dtype=torch.long)
-    speaker_ids = torch.zeros(B, max_turns, dtype=torch.long)
     turn_mask = torch.zeros(B, max_turns, dtype=torch.float)
     labels = torch.zeros(B, max_turns, dtype=torch.float)
 
@@ -97,14 +91,12 @@ def streaming_collate_fn(batch: List[Dict]) -> Dict[str, torch.Tensor]:
         T = item["num_turns"]
         input_ids[i, :T] = item["input_ids"]
         attention_mask[i, :T] = item["attention_mask"]
-        speaker_ids[i, :T] = item["speaker_ids"]
         turn_mask[i, :T] = 1.0   # turn thật = 1, padding = 0
         labels[i, :T] = item["labels"]
 
     return {
         "input_ids": input_ids,
         "attention_mask": attention_mask,
-        "speaker_ids": speaker_ids,
         "turn_mask": turn_mask,
         "labels": labels,
     }

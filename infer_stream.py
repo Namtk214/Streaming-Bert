@@ -160,9 +160,6 @@ class StreamingInferenceEngine:
         input_ids = encoding["input_ids"].to(self.device)
         attention_mask = encoding["attention_mask"].to(self.device)
 
-        # Speaker
-        speaker_id = SPEAKER_MAP.get(speaker, SPEAKER_MAP["unknown"])
-
         # Get cached state
         if dialogue_id in self._state_cache:
             h_prev = self._state_cache[dialogue_id]["hidden"]
@@ -173,7 +170,7 @@ class StreamingInferenceEngine:
 
         # Forward (no grad)
         logit, h_new = self.model.encode_single_turn(
-            input_ids, attention_mask, speaker_id, h_prev
+            input_ids, attention_mask, h_prev
         )
 
         # Sigmoid

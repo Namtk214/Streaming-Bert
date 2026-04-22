@@ -285,113 +285,95 @@ def create_app(engine: StreamingInferenceEngine):
         return html, chart, text
 
     # ── Streaming chat ──
-    def chat_step(text, speaker, chat_history, dialogue_state):
+    def chat_step(text, chat_history, dialogue_state):
         """Them 1 turn moi vao hoi thoai."""
         if not text.strip():
             return chat_history, dialogue_state, "", ""
 
         if dialogue_state is None:
-            dialogue_state = {"messages": [], "results": [], "dlg_id": "chat_session"}
+            dialogue_state = {"messages": [], "results": []}
             engine.reset("chat_session")
 
-        # Predict
-        result = engine.predict_turn("chat_session", text, speaker)
-        msg = {"speaker_role": speaker, "text": text}
+        result = engine.predict_turn("chat_session", text)
+        msg = {"speaker_role": "normal", "text": text}
 
         dialogue_state["messages"].append(msg)
         dialogue_state["results"].append(result)
 
-        # Build chat display
         prob = result["probability"]
         label = prob_to_label(prob)
-        color = prob_to_color(prob)
         status = f" [{label} {prob:.1%}]"
 
-        if speaker == "scammer":
-            chat_history = chat_history or []
-            chat_history.append([None, text + status])
-        else:
-            chat_history = chat_history or []
-            chat_history.append([text + status, None])
+        chat_history = chat_history or []
+        chat_history.append([text + status, None])
 
-        # Build result + chart
         html = build_result_html(dialogue_state["results"], dialogue_state["messages"])
         chart = build_prob_chart(dialogue_state["results"])
 
         return chat_history, dialogue_state, html, chart
 
     def reset_chat():
-        """Reset hoi thoai."""
         engine.reset("chat_session")
         return [], None, "", ""
 
     # ── Build UI ──
     with gr.Blocks(
         title="Streaming Scam Detection",
-        theme=gr.themes.Soft(
-            primary_hue="red",
-            secondary_hue="green",
-        ),
+        theme=gr.themes.Soft(primary_hue="red", secondary_hue="green"),
         css="""
         .gradio-container {
-            max-width: 960px !important;
-            margin-left: auto !important;
-            margin-right: auto !important;
+            max-width: 980px !important;
+            margin: 0 auto !important;
+            padding-left: 16px !important;
+            padding-right: 16px !important;
         }
         .result-panel { min-height: 200px; }
-        """
+        """,
     ) as app:
-        with gr.Column():
-            gr.Markdown("""
-            # Streaming Scam Detection
-            **PhoBERT + GRU** - Phat hien lua dao theo thoi gian thuc
+        gr.Markdown("""
+        # Streaming Scam Detection
+        **PhoBERT + GRU** - Phat hien lua dao theo thoi gian thuc
 
-            Model phan tich tung turn hoi thoai va dua ra xac suat scam.
-            """)
+        Model phan tich tung turn hoi thoai va dua ra xac suat scam.
+        """)
 
-            with gr.Tabs():
-                # ── Tab 1: Chat Mode ──
-                with gr.Tab("Chat Mode"):
-                    gr.Markdown("Nhap tung turn de mo phong hoi thoai streaming.")
+        with gr.Tabs():
+            # ── Tab 1: Chat Mode ──
+            with gr.Tab("Chat Mode"):
+                gr.Markdown("Nhap tung turn de mo phong hoi thoai streaming.")
 
-                    with gr.Row():
-                        with gr.Column(scale=1):
-                            chatbot = gr.Chatbot(label="Hoi thoai", height=350)
-                            with gr.Row():
-                                chat_input = gr.Textbox(
-                                    label="Nhap noi dung turn",
-                                    placeholder="Nhap text...",
-                                    scale=3,
-                                )
-                                chat_speaker = gr.Radio(
-                                    ["normal", "scammer"],
-                                    value="normal",
-                                    label="Speaker",
-                                    scale=1,
-                                )
-                            with gr.Row():
-                                send_btn = gr.Button("Gui turn", variant="primary")
-                                reset_btn = gr.Button("Reset", variant="secondary")
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        chatbot = gr.Chatbot(label="Hoi thoai", height=350)
+                        with gr.Row():
+                            chat_input = gr.Textbox(
+                                label="Nhap noi dung turn",
+                                placeholder="Nhap text...",
+                                scale=4,
+                            )
+                        with gr.Row():
+                            send_btn = gr.Button("Gui turn", variant="primary")
+                            reset_btn = gr.Button("Reset", variant="secondary")
 
-                        with gr.Column(scale=1):
-                            chat_detail = gr.HTML(label="Chi tiet", elem_classes="result-panel")
-                            chat_chart = gr.HTML(label="Timeline")
+                    with gr.Column(scale=1):
+                        chat_detail = gr.HTML(label="Chi tiet", elem_classes="result-panel")
+                        chat_chart = gr.HTML(label="Timeline")
 
-                    chat_state = gr.State(None)
+                chat_state = gr.State(None)
 
-                    send_btn.click(
-                        chat_step,
-                        [chat_input, chat_speaker, chatbot, chat_state],
-                        [chatbot, chat_state, chat_detail, chat_chart],
-                    ).then(lambda: "", None, chat_input)
+                send_btn.click(
+                    chat_step,
+                    [chat_input, chatbot, chat_state],
+                    [chatbot, chat_state, chat_detail, chat_chart],
+                ).then(lambda: "", None, chat_input)
 
-                    chat_input.submit(
-                        chat_step,
-                        [chat_input, chat_speaker, chatbot, chat_state],
-                        [chatbot, chat_state, chat_detail, chat_chart],
-                    ).then(lambda: "", None, chat_input)
+                chat_input.submit(
+                    chat_step,
+                    [chat_input, chatbot, chat_state],
+                    [chatbot, chat_state, chat_detail, chat_chart],
+                ).then(lambda: "", None, chat_input)
 
-                    reset_btn.click(reset_chat, None, [chatbot, chat_state, chat_detail, chat_chart])
+                reset_btn.click(reset_chat, None, [chatbot, chat_state, chat_detail, chat_chart])
 
                 # ── Tab 2: Batch Mode ──
                 with gr.Tab("Batch Mode"):
