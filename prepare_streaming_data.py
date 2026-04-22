@@ -95,9 +95,9 @@ def assign_prefix_labels(conversation: Dict) -> List[int]:
     Gán binary scam label theo prefix rule.
 
     SCAM/AMBIGUOUS:
-      - Tìm turn đầu tiên có t4_labels (bằng chứng scam)
-      - Nếu không có t4_labels, tìm turn đầu tiên speaker=scammer
-      - Từ turn đó trở đi: label=1
+      - Ưu tiên dùng scam_onset_hint nếu có (đã annotate sẵn)
+      - Fallback: turn thứ 2 của scammer (bỏ qua greeting turn đầu)
+      - Fallback cuối: giữa conversation
 
     LEGIT:
       - Toàn bộ label=0
@@ -109,23 +109,21 @@ def assign_prefix_labels(conversation: Dict) -> List[int]:
     if t1_label == "LEGIT":
         return [0] * num_turns
 
-    # Tìm scam onset: ưu tiên turn có t4_labels
     scam_onset = None
 
-    # Cách 1: turn đầu tiên có t4_labels
-    for i, msg in enumerate(messages):
-        if msg.get("t4_labels") and len(msg["t4_labels"]) > 0:
-            scam_onset = i
-            break
+    # Cách 1: dùng scam_onset_hint nếu đã annotate
+    if "scam_onset_hint" in conversation:
+        scam_onset = int(conversation["scam_onset_hint"])
 
-    # Cách 2 (fallback): turn đầu tiên speaker=scammer
+    # Cách 2: turn thứ 2 của scammer (bỏ qua greeting)
     if scam_onset is None:
-        for i, msg in enumerate(messages):
-            if msg["speaker_role"] == "scammer":
-                scam_onset = i
-                break
+        scammer_turns = [i for i, m in enumerate(messages) if m["speaker_role"] == "scammer"]
+        if len(scammer_turns) >= 2:
+            scam_onset = scammer_turns[1]
+        elif scammer_turns:
+            scam_onset = scammer_turns[0]
 
-    # Cách 3 (fallback cuối): coi như scam từ turn giữa
+    # Cách 3 (fallback cuối)
     if scam_onset is None:
         scam_onset = num_turns // 2
 
