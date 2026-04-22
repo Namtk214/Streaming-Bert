@@ -32,7 +32,7 @@ class StreamingConfig:
 
     # Training
     num_epochs: int = 10
-    batch_size: int = 4
+    batch_size: int = 2
 
     # Data split
     seed: int = 42
