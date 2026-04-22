@@ -13,10 +13,10 @@ class StreamingConfig:
 
     # PhoBERT turn encoder
     model_name: str = "vinai/phobert-base-v2"
-    max_tokens_per_turn: int = 256
+    max_tokens_per_turn: int = 128
 
     # GRU conversation encoder
-    gru_hidden_size: int = 128
+    gru_hidden_size: int = 256
     gru_num_layers: int = 1
 
     # Regularization
