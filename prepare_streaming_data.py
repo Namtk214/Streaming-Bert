@@ -139,14 +139,10 @@ def assign_turn_labels(conversation: Dict) -> List[int]:
     LEGIT:
       - Toàn bộ turns = LEGIT.
 
-    SCAM:
+    SCAM/AMBIGUOUS:
       - Trước onset = LEGIT
       - Turn onset = AMBIGUOUS
       - Sau onset = SCAM
-
-    AMBIGUOUS:
-      - Nếu có onset/hint thì trước onset = LEGIT, từ onset = AMBIGUOUS
-      - Nếu không có onset rõ thì toàn bộ turns = AMBIGUOUS
     """
     messages = conversation["messages"]
     t1_label = conversation["t1_label"]
@@ -154,9 +150,6 @@ def assign_turn_labels(conversation: Dict) -> List[int]:
 
     if t1_label == "LEGIT":
         return [TURN_LABEL_MAP["LEGIT"]] * num_turns
-
-    if t1_label == "AMBIGUOUS" and conversation.get("scam_onset_hint") is None:
-        return [TURN_LABEL_MAP["AMBIGUOUS"]] * num_turns
 
     scam_onset = find_scam_onset(conversation)
     labels = []
@@ -166,17 +159,13 @@ def assign_turn_labels(conversation: Dict) -> List[int]:
         elif i == scam_onset:
             labels.append(TURN_LABEL_MAP["AMBIGUOUS"])
         else:
-            labels.append(
-                TURN_LABEL_MAP["AMBIGUOUS"]
-                if t1_label == "AMBIGUOUS"
-                else TURN_LABEL_MAP["SCAM"]
-            )
+            labels.append(TURN_LABEL_MAP["SCAM"])
     return labels
 
 
 def turn_label_to_binary(label: int) -> int:
-    """Binary target cho model hiện tại: alert từ AMBIGUOUS/SCAM trở đi."""
-    return 0 if label == TURN_LABEL_MAP["LEGIT"] else 1
+    """Binary target cho model hiện tại: chỉ SCAM là positive."""
+    return 1 if label == TURN_LABEL_MAP["SCAM"] else 0
 
 
 # ============================================================
@@ -348,6 +337,15 @@ def main():
         split_labels = [d["conversation_label"] for d in split]
         counts = {lbl: split_labels.count(lbl) for lbl in sorted(set(split_labels))}
         print(f"    {name}: {counts}")
+
+    # Thống kê turn-level labels per split
+    for name, split in [("Train", train), ("Val", val), ("Test", test)]:
+        turn_labels = [turn["turn_label"] for dlg in split for turn in dlg["turns"]]
+        counts = {
+            TURN_LABEL_NAMES[label_id]: turn_labels.count(label_id)
+            for label_id in sorted(TURN_LABEL_NAMES)
+        }
+        print(f"    {name} turn labels: {counts}")
 
     # ── 5. Lưu ──
     os.makedirs(args.output_dir, exist_ok=True)
