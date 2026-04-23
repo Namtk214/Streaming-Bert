@@ -21,6 +21,7 @@ import os
 import sys
 import json
 
+import numpy as np
 import torch
 from transformers import AutoTokenizer
 
@@ -169,15 +170,15 @@ class StreamingInferenceEngine:
             turn_idx = 1
 
         # Forward (no grad)
-        logit, h_new = self.model.encode_single_turn(
+        probs, h_new = self.model.encode_single_turn(
             input_ids, attention_mask, h_prev
         )
+        # probs: [p_legit, p_scam, p_ambiguous]
+        pred_class = int(np.argmax(probs))
+        prob_scam = float(probs[1])
+        prob_ambiguous = float(probs[2])
 
-        # Sigmoid
-        import math
-        prob = 1.0 / (1.0 + math.exp(-logit))
-
-        is_scam = prob >= self.threshold
+        is_scam = pred_class in (1, 2)  # SCAM hoặc AMBIGUOUS đều alert
 
         # Cache state
         self._state_cache[dialogue_id] = {
@@ -185,10 +186,16 @@ class StreamingInferenceEngine:
             "turn_index": turn_idx,
         }
 
+        class_names = {0: "LEGIT", 1: "SCAM", 2: "AMBIGUOUS"}
         return {
             "dialogue_id": dialogue_id,
             "turn_index": turn_idx,
-            "probability": round(prob, 4),
+            "predicted_class": pred_class,
+            "predicted_label": class_names[pred_class],
+            "prob_legit":     round(float(probs[0]), 4),
+            "prob_scam":      round(prob_scam, 4),
+            "prob_ambiguous": round(prob_ambiguous, 4),
+            "probability": round(prob_scam + prob_ambiguous, 4),  # compat với visualize
             "is_scam": bool(is_scam),
             "speaker": speaker,
             "text_preview": text,

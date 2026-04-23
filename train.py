@@ -132,15 +132,18 @@ def preview_sample(model, dataloader, device, threshold=0.5, max_samples=2):
             turn_mask=batch["turn_mask"],
         )
 
-        logits = output["logits"][0].cpu().numpy()
+        logits = output["logits"][0].cpu().numpy()  # [T, C]
         labels = batch["labels"][0].cpu().numpy()
         mask = batch["turn_mask"][0].cpu().numpy()
         valid_len = int(mask.sum())
 
-        probs = 1 / (1 + np.exp(-logits[:valid_len]))
-        preds = (probs >= threshold).astype(int)
+        logits_v = logits[:valid_len]                              # [T, C]
+        e = np.exp(logits_v - logits_v.max(axis=-1, keepdims=True))
+        probs = e / e.sum(axis=-1, keepdims=True)                  # [T, C]
+        preds = probs.argmax(axis=-1).astype(int)
         true = labels[:valid_len].astype(int)
 
+        label_map = {0: "L", 1: "S", 2: "A"}
         dialogue = dataset.dialogues[dataset_idx]
         match = "[OK]" if np.array_equal(preds, true) else "[X]"
         print(
@@ -148,10 +151,9 @@ def preview_sample(model, dataloader, device, threshold=0.5, max_samples=2):
             f"id={dialogue.get('dialogue_id')} "
             f"label={dialogue.get('conversation_label')} {match}"
         )
-        print(f"      Turn:  {list(range(1, valid_len + 1))}")
-        print(f"      True:  {true.tolist()}")
-        print(f"      Pred:  {preds.tolist()}")
-        print(f"      Probs: [{', '.join(f'{p:.2f}' for p in probs)}]")
+        print(f"      Turn: {list(range(1, valid_len + 1))}")
+        print(f"      True: {[label_map[v] for v in true.tolist()]}")
+        print(f"      Pred: {[label_map[v] for v in preds.tolist()]}")
 
 
 # ============================================================
@@ -276,15 +278,15 @@ def train(cfg: StreamingConfig = None):
 
         elapsed = time.time() - epoch_start
         print(f"\n  Epoch {epoch}/{cfg.num_epochs} ({elapsed:.1f}s)")
-        print(f"    Train loss:  {avg_train_loss:.4f}")
-        print(f"    Val loss:    {val_metrics['loss']:.4f}")
-        print(f"    Val F1:      {val_metrics['f1']:.4f}")
-        print(f"    Val AUROC:   {val_metrics['auroc']:.4f}")
-        print(f"    Val Prec:    {val_metrics['precision']:.4f}")
-        print(f"    Val Recall:  {val_metrics['recall']:.4f}")
+        print(f"    Train loss:      {avg_train_loss:.4f}")
+        print(f"    Val loss:        {val_metrics['loss']:.4f}")
+        print(f"    Turn acc:        {val_metrics['turn_accuracy']:.4f}")
+        print(f"    Turn macro F1:   {val_metrics['turn_macro_f1']:.4f}")
+        print(f"    Final macro F1:  {val_metrics['final_macro_f1']:.4f}")
+        print(f"    Detection rate:  {val_metrics['detection_rate']:.4f}")
         if not np.isnan(val_metrics['avg_detection_delay']):
-            print(f"    Avg delay:   {val_metrics['avg_detection_delay']:.2f} turns")
-        print(f"    False alarm: {val_metrics['false_alarm_rate']:.4f}")
+            print(f"    Avg delay:       {val_metrics['avg_detection_delay']:.2f} turns")
+        print(f"    False alarm:     {val_metrics['false_alarm_rate']:.4f}")
 
         # Sample preview
         preview_sample(model, val_loader, device, cfg.threshold)

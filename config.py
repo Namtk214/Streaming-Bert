@@ -19,6 +19,9 @@ class StreamingConfig:
     gru_hidden_size: int = 256
     gru_num_layers: int = 1
 
+    # Classifier
+    num_classes: int = 3  # 0=LEGIT, 1=SCAM, 2=AMBIGUOUS
+
     # Regularization
     head_dropout: float = 0.2
 
