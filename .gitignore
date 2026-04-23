@@ -1,8 +1,0 @@
-data/
-outputs/
-__pycache__/
-*.pyc
-.ipynb_checkpoints/
-streaming/
-early_exit_weighted_loss_implementation.txt
-.git/
