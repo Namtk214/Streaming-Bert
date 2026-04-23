@@ -120,7 +120,7 @@ def preview_sample(model, dataloader, device, threshold=0.5, max_samples=2):
 
     selected_indices = selected_indices[:max_samples]
 
-    print(f"\n  -- Random Validation Preview --")
+    print("\n  -- Random Validation Preview --")
     for preview_idx, dataset_idx in enumerate(selected_indices, start=1):
         item = dataset[dataset_idx]
         batch = streaming_collate_fn([item])
@@ -143,7 +143,6 @@ def preview_sample(model, dataloader, device, threshold=0.5, max_samples=2):
         preds = probs.argmax(axis=-1).astype(int)
         true = labels[:valid_len].astype(int)
 
-        label_map = {0: "L", 1: "S", 2: "A"}
         dialogue = dataset.dialogues[dataset_idx]
         match = "[OK]" if np.array_equal(preds, true) else "[X]"
         print(
@@ -152,8 +151,8 @@ def preview_sample(model, dataloader, device, threshold=0.5, max_samples=2):
             f"label={dialogue.get('conversation_label')} {match}"
         )
         print(f"      Turn: {list(range(1, valid_len + 1))}")
-        print(f"      True: {[label_map[v] for v in true.tolist()]}")
-        print(f"      Pred: {[label_map[v] for v in preds.tolist()]}")
+        print(f"      True: {true.tolist()}")
+        print(f"      Pred: {preds.tolist()}")
 
 
 # ============================================================
@@ -218,6 +217,7 @@ def train(cfg: StreamingConfig = None):
     param_groups = model.get_param_groups(cfg.encoder_lr, cfg.rnn_head_lr)
     optimizer = AdamW(
         param_groups,
+        lr=cfg.encoder_lr,
         weight_decay=cfg.weight_decay,
         eps=cfg.adam_epsilon,
     )
@@ -322,10 +322,11 @@ def train(cfg: StreamingConfig = None):
             break
 
     # ── 6. Final evaluation trên test set ──
-    print(f"\n{'='*60}")
-    print(f"TRAINING COMPLETED")
+    sep = "=" * 60
+    print(f"\n{sep}")
+    print("TRAINING COMPLETED")
     print(f"  Best epoch: {best_epoch} | Best val F1: {best_f1:.4f}")
-    print(f"{'='*60}")
+    print(sep)
 
     # Load best model
     best_path = os.path.join(cfg.output_dir, "best_model", "model.pt")

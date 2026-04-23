@@ -46,11 +46,6 @@ class StreamingConfig:
     threshold: float = 0.5
 
     # Paths
-    raw_data_path: str = field(
-        default_factory=lambda: os.path.join(
-            STREAMING_ROOT, "data", "excel_raw_conversations.json"
-        )
-    )
     streaming_data_dir: str = field(
         default_factory=lambda: os.path.join(STREAMING_ROOT, "data")
     )
