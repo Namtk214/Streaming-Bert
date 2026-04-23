@@ -4,9 +4,11 @@ Chuyển đổi raw conversations → streaming format cho training.
 Quy trình:
   1. Đọc raw conversations JSON từ đường dẫn input
   2. Clean text + word segmentation (VnCoreNLP)
-  3. Gán binary scam label theo prefix rule:
-     - SCAM/AMBIGUOUS: label=1 từ turn scammer có tactic đầu tiên
-     - LEGIT: toàn bộ label=0
+  3. Gán turn-level labels theo onset:
+     - LEGIT: 0
+     - SCAM: 1
+     - AMBIGUOUS: 2
+     - scam_label binary vẫn được giữ để train model hiện tại
   4. Chia train/val/test theo conversation_id
   5. Lưu streaming format JSON
 
@@ -15,7 +17,8 @@ Output format mỗi dialogue:
     "dialogue_id": "...",
     "turns": [
       {"turn_id": 1, "speaker": 0, "text": "...",
-       "text_segmented": "...", "scam_label": 0},
+       "text_segmented": "...", "scam_label": 0,
+       "turn_label": 0, "turn_label_name": "LEGIT"},
       ...
     ]
   }
@@ -40,6 +43,10 @@ _cfg_mod = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_cfg_mod)
 StreamingConfig = _cfg_mod.StreamingConfig
 SPEAKER_MAP = _cfg_mod.SPEAKER_MAP
+
+TURN_LABEL_MAP = {"LEGIT": 0, "SCAM": 1, "AMBIGUOUS": 2}
+TURN_LABEL_NAMES = {v: k for k, v in TURN_LABEL_MAP.items()}
+GENERIC_T4_LABELS = {"SCAM_INDICATOR"}
 
 
 # ============================================================
@@ -88,47 +95,88 @@ class WordSegmenter:
 
 
 # ============================================================
-# Binary label generation theo prefix rule
+# Turn label generation theo onset
 # ============================================================
-def assign_prefix_labels(conversation: Dict) -> List[int]:
+def find_scam_onset(conversation: Dict) -> int:
     """
-    Gán binary scam label theo prefix rule.
+    Tìm scam onset dạng 0-based index.
 
-    SCAM/AMBIGUOUS:
-      - Ưu tiên dùng scam_onset_hint nếu có (đã annotate sẵn)
-      - Fallback: turn thứ 2 của scammer (bỏ qua greeting turn đầu)
-      - Fallback cuối: giữa conversation
+    Ưu tiên:
+      1. scam_onset_hint nếu có trong raw JSON. Field này được xem là 1-based.
+      2. t4_labels thật, bỏ qua marker generic do converter thêm.
+      3. turn thứ 2 của scammer để tránh coi greeting là onset.
+      4. giữa conversation.
+    """
+    messages = conversation["messages"]
+    num_turns = len(messages)
+
+    hint = conversation.get("scam_onset_hint")
+    if hint is not None:
+        hint = int(hint)
+        return max(0, min(num_turns - 1, hint - 1 if hint > 0 else hint))
+
+    for i, msg in enumerate(messages):
+        t4_labels = set(msg.get("t4_labels") or [])
+        if t4_labels and not t4_labels.issubset(GENERIC_T4_LABELS):
+            return i
+
+    scammer_turns = [
+        i for i, msg in enumerate(messages)
+        if msg.get("speaker_role") == "scammer"
+    ]
+    if len(scammer_turns) >= 2:
+        return scammer_turns[1]
+    if scammer_turns:
+        return scammer_turns[0]
+
+    return num_turns // 2
+
+
+def assign_turn_labels(conversation: Dict) -> List[int]:
+    """
+    Gán turn-level labels theo onset.
 
     LEGIT:
-      - Toàn bộ label=0
+      - Toàn bộ turns = LEGIT.
+
+    SCAM:
+      - Trước onset = LEGIT
+      - Turn onset = AMBIGUOUS
+      - Sau onset = SCAM
+
+    AMBIGUOUS:
+      - Nếu có onset/hint thì trước onset = LEGIT, từ onset = AMBIGUOUS
+      - Nếu không có onset rõ thì toàn bộ turns = AMBIGUOUS
     """
     messages = conversation["messages"]
     t1_label = conversation["t1_label"]
     num_turns = len(messages)
 
     if t1_label == "LEGIT":
-        return [0] * num_turns
+        return [TURN_LABEL_MAP["LEGIT"]] * num_turns
 
-    scam_onset = None
+    if t1_label == "AMBIGUOUS" and conversation.get("scam_onset_hint") is None:
+        return [TURN_LABEL_MAP["AMBIGUOUS"]] * num_turns
 
-    # Cách 1: dùng scam_onset_hint nếu đã annotate
-    if "scam_onset_hint" in conversation:
-        scam_onset = int(conversation["scam_onset_hint"])
-
-    # Cách 2: turn thứ 2 của scammer (bỏ qua greeting)
-    if scam_onset is None:
-        scammer_turns = [i for i, m in enumerate(messages) if m["speaker_role"] == "scammer"]
-        if len(scammer_turns) >= 2:
-            scam_onset = scammer_turns[1]
-        elif scammer_turns:
-            scam_onset = scammer_turns[0]
-
-    # Cách 3 (fallback cuối)
-    if scam_onset is None:
-        scam_onset = num_turns // 2
-
-    labels = [0] * scam_onset + [1] * (num_turns - scam_onset)
+    scam_onset = find_scam_onset(conversation)
+    labels = []
+    for i in range(num_turns):
+        if i < scam_onset:
+            labels.append(TURN_LABEL_MAP["LEGIT"])
+        elif i == scam_onset:
+            labels.append(TURN_LABEL_MAP["AMBIGUOUS"])
+        else:
+            labels.append(
+                TURN_LABEL_MAP["AMBIGUOUS"]
+                if t1_label == "AMBIGUOUS"
+                else TURN_LABEL_MAP["SCAM"]
+            )
     return labels
+
+
+def turn_label_to_binary(label: int) -> int:
+    """Binary target cho model hiện tại: alert từ AMBIGUOUS/SCAM trở đi."""
+    return 0 if label == TURN_LABEL_MAP["LEGIT"] else 1
 
 
 # ============================================================
@@ -137,7 +185,10 @@ def assign_prefix_labels(conversation: Dict) -> List[int]:
 def convert_to_streaming(conversation: Dict, segmenter: WordSegmenter) -> Dict:
     """Chuyển 1 conversation thành streaming format."""
     messages = conversation["messages"]
-    prefix_labels = assign_prefix_labels(conversation)
+    turn_labels = assign_turn_labels(conversation)
+    binary_labels = [turn_label_to_binary(label) for label in turn_labels]
+    onset = next((i + 1 for i, label in enumerate(turn_labels)
+                  if label != TURN_LABEL_MAP["LEGIT"]), None)
 
     turns = []
     for i, msg in enumerate(messages):
@@ -152,12 +203,15 @@ def convert_to_streaming(conversation: Dict, segmenter: WordSegmenter) -> Dict:
             "speaker": speaker_id,
             "text": text_clean,
             "text_segmented": text_segmented,
-            "scam_label": prefix_labels[i],
+            "scam_label": binary_labels[i],
+            "turn_label": turn_labels[i],
+            "turn_label_name": TURN_LABEL_NAMES[turn_labels[i]],
         })
 
     return {
         "dialogue_id": conversation["conversation_id"],
         "conversation_label": conversation["t1_label"],
+        "scam_onset": onset,
         "turns": turns,
     }
 
@@ -308,10 +362,12 @@ def main():
     print("\n-- Sample dialogue (train) --")
     if train:
         sample = train[0]
-        print(f"  ID: {sample['dialogue_id']} | Label: {sample['conversation_label']}")
-        for turn in sample["turns"][:3]:
+        print(f"  ID: {sample['dialogue_id']} | Label: {sample['conversation_label']} "
+              f"| onset: {sample.get('scam_onset')}")
+        for turn in sample["turns"][:6]:
             print(f"    Turn {turn['turn_id']} (speaker={turn['speaker']}, "
-                  f"scam={turn['scam_label']}): {turn['text'][:60]}...")
+                  f"binary={turn['scam_label']}, "
+                  f"label={turn['turn_label_name']}): {turn['text'][:60]}...")
 
     print("\nDone!")
 

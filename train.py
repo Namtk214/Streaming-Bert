@@ -315,7 +315,7 @@ def train(cfg: StreamingConfig = None):
             patience_counter += 1
             print(f"    No improvement ({patience_counter}/{patience})")
 
-        if patience_counter >= patience and epoch > cfg.stage_a_epochs:
+        if patience_counter >= patience:
             print(f"\n  Early stopping at epoch {epoch}")
             break
 
