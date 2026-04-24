@@ -1,138 +1,116 @@
 """
-Multi-class Evaluation Metrics cho Streaming 3-class Scam Detection.
-Classes: 0=LEGIT, 1=SCAM, 2=AMBIGUOUS
+Evaluation Metrics cho Streaming Binary Scam Detection (Noisy-OR MIL).
+
+Input từ evaluate():
+  - all_dialogue_labels : List[int]          – 0/1 mỗi dialogue
+  - all_dialogue_probs  : List[float]        – Noisy-OR aggregated prob
+  - all_turn_probs      : List[np.ndarray]   – p_t per real turn [T]
 
 Metrics:
-  1. Turn-level: accuracy, macro F1
-  2. Final-turn: accuracy, macro F1 (prediction tại turn cuối của dialogue)
-  3. Onset detection: detection rate, mean onset error, avg delay
-  4. False alarm: tỷ lệ LEGIT dialogues bị flag nhầm
+  1. Dialogue-level: accuracy, F1, AUROC  (dựa vào dialogue_probs)
+  2. Streaming detection (dựa vào turn_probs):
+       - detection_rate     : % scam dialogues được alert ít nhất 1 turn
+       - avg_detection_delay: trung bình turn đầu tiên có p_t ≥ threshold (0-based)
+       - false_alarm_rate   : % harmless dialogues bị alert ít nhất 1 turn
 """
 
 import numpy as np
-from sklearn.metrics import accuracy_score, f1_score
+from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
 from typing import Dict, List
-
-LEGIT = 0
-SCAM = 1
-AMBIGUOUS = 2
-LABEL_NAMES = {LEGIT: "LEGIT", SCAM: "SCAM", AMBIGUOUS: "AMBIGUOUS"}
 
 
 def compute_streaming_metrics(
-    all_labels: List[np.ndarray],
-    all_logits: List[np.ndarray],
-    all_turn_masks: List[np.ndarray],
-    threshold: float = 0.5,   # unused, kept for API compat
+    all_dialogue_labels: List[int],
+    all_dialogue_probs: List[float],
+    all_turn_probs: List[np.ndarray],
+    threshold: float = 0.5,
 ) -> Dict[str, float]:
     """
     Parameters
     ----------
-    all_labels     : list of [T]   – class index, có padding
-    all_logits     : list of [T,C] – raw logits 3-class, có padding
-    all_turn_masks : list of [T]   – 1=real turn, 0=padding
+    all_dialogue_labels : List[int]          0/1, N dialogues
+    all_dialogue_probs  : List[float]        Noisy-OR prob, N dialogues
+    all_turn_probs      : List[np.ndarray]   per-turn probs, real turns only
+    threshold           : float
     """
-    flat_preds, flat_labels = [], []
-    final_preds, final_labels = [], []
+    d_labels = np.array(all_dialogue_labels)
+    d_probs  = np.array(all_dialogue_probs)
+    d_preds  = (d_probs >= threshold).astype(int)
 
-    onset_errors = []
+    # Dialogue-level
+    try:
+        auroc = float(roc_auc_score(d_labels, d_probs))
+    except ValueError:
+        auroc = float("nan")
+
     detection_delays = []
-    num_scam_dialogues = 0
-    num_detected = 0
-    num_legit_dialogues = 0
-    num_false_alarms = 0
+    num_scam, num_detected = 0, 0
+    num_harmless, num_false_alarms = 0, 0
 
-    for labels, logits, mask in zip(all_labels, all_logits, all_turn_masks):
-        valid_len = int(mask.sum())
-        vlabels = labels[:valid_len].astype(int)
-        probs = _softmax(logits[:valid_len])          # [T, C]
-        vpreds = probs.argmax(axis=-1).astype(int)    # [T]
+    for label, turn_probs in zip(all_dialogue_labels, all_turn_probs):
+        first_alert = _first_alert_turn(turn_probs, threshold)
 
-        flat_preds.extend(vpreds.tolist())
-        flat_labels.extend(vlabels.tolist())
-
-        if valid_len > 0:
-            final_preds.append(int(vpreds[-1]))
-            final_labels.append(int(vlabels[-1]))
-
-        true_onset = _first_nonlegit(vlabels)
-        pred_onset = _first_nonlegit(vpreds)
-
-        if true_onset is not None:
-            num_scam_dialogues += 1
-            if pred_onset is not None:
+        if label == 1:  # scam
+            num_scam += 1
+            if first_alert is not None:
                 num_detected += 1
-                onset_errors.append(abs(pred_onset - true_onset))
-                detection_delays.append(max(0, pred_onset - true_onset))
-        else:
-            num_legit_dialogues += 1
-            if pred_onset is not None:
+                detection_delays.append(first_alert)   # 0-based turn index
+        else:           # harmless
+            num_harmless += 1
+            if first_alert is not None:
                 num_false_alarms += 1
 
-    flat_labels = np.array(flat_labels)
-    flat_preds = np.array(flat_preds)
-
     metrics = {
-        "turn_accuracy":  accuracy_score(flat_labels, flat_preds),
-        "turn_macro_f1":  f1_score(flat_labels, flat_preds, average="macro", zero_division=0),
-        "final_accuracy": accuracy_score(final_labels, final_preds) if final_labels else 0.0,
-        "final_macro_f1": f1_score(final_labels, final_preds, average="macro", zero_division=0) if final_labels else 0.0,
-        "detection_rate":      num_detected / max(num_scam_dialogues, 1),
-        "mean_onset_error":    float(np.mean(onset_errors))     if onset_errors     else float("nan"),
-        "avg_detection_delay": float(np.mean(detection_delays)) if detection_delays else float("nan"),
-        "false_alarm_rate":    num_false_alarms / max(num_legit_dialogues, 1),
-        "num_scam_dialogues":  num_scam_dialogues,
-        "num_legit_dialogues": num_legit_dialogues,
-        "num_detected":        num_detected,
-        "num_false_alarms":    num_false_alarms,
-        # Aliases cho train.py
-        "accuracy": accuracy_score(flat_labels, flat_preds),
-        "f1":       f1_score(flat_labels, flat_preds, average="macro", zero_division=0),
-        "auroc":    0.0,
+        # Dialogue-level
+        "dialogue_accuracy": float(accuracy_score(d_labels, d_preds)),
+        "dialogue_f1":       float(f1_score(d_labels, d_preds, zero_division=0)),
+        "auroc":             auroc,
+        # Streaming
+        "detection_rate":         num_detected / max(num_scam, 1),
+        "avg_detection_delay":    float(np.mean(detection_delays)) if detection_delays else float("nan"),
+        "false_alarm_rate":       num_false_alarms / max(num_harmless, 1),
+        "num_scam":               num_scam,
+        "num_harmless":           num_harmless,
+        "num_detected":           num_detected,
+        "num_false_alarms":       num_false_alarms,
+        # aliases for train.py early stopping
+        "accuracy": float(accuracy_score(d_labels, d_preds)),
+        "f1":       float(f1_score(d_labels, d_preds, zero_division=0)),
     }
-
     return metrics
 
 
 def print_streaming_report(metrics: Dict[str, float]):
     print("\n" + "=" * 60)
-    print("STREAMING 3-CLASS EVALUATION REPORT")
+    print("STREAMING BINARY EVALUATION REPORT")
     print("=" * 60)
 
-    print("\n  Turn-Level Metrics:")
-    print(f"    Accuracy:  {metrics['turn_accuracy']:.4f}")
-    print(f"    Macro F1:  {metrics['turn_macro_f1']:.4f}")
+    print("\n  Dialogue-Level Metrics (Noisy-OR aggregation):")
+    print(f"    Accuracy: {metrics['dialogue_accuracy']:.4f}")
+    print(f"    F1:       {metrics['dialogue_f1']:.4f}")
+    if not np.isnan(metrics.get("auroc", float("nan"))):
+        print(f"    AUROC:    {metrics['auroc']:.4f}")
 
-    print("\n  Final-Turn Metrics:")
-    print(f"    Accuracy:  {metrics['final_accuracy']:.4f}")
-    print(f"    Macro F1:  {metrics['final_macro_f1']:.4f}")
-
-    print("\n  Onset Detection:")
-    print(f"    Detection rate:   {metrics['detection_rate']:.4f} "
-          f"({metrics['num_detected']}/{metrics['num_scam_dialogues']})")
-    if not np.isnan(metrics["mean_onset_error"]):
-        print(f"    Mean onset error: {metrics['mean_onset_error']:.2f} turns")
+    print("\n  Streaming Detection (per-turn threshold):")
+    print(
+        f"    Detection rate:   {metrics['detection_rate']:.4f} "
+        f"({metrics['num_detected']}/{metrics['num_scam']})"
+    )
     if not np.isnan(metrics["avg_detection_delay"]):
         print(f"    Avg delay:        {metrics['avg_detection_delay']:.2f} turns")
-    print(f"    False alarm rate: {metrics['false_alarm_rate']:.4f} "
-          f"({metrics['num_false_alarms']}/{metrics['num_legit_dialogues']})")
+    print(
+        f"    False alarm rate: {metrics['false_alarm_rate']:.4f} "
+        f"({metrics['num_false_alarms']}/{metrics['num_harmless']})"
+    )
 
     if "loss" in metrics:
         print(f"\n  Loss: {metrics['loss']:.4f}")
     print("=" * 60)
 
 
-def _softmax(x: np.ndarray) -> np.ndarray:
-    x = np.array(x)
-    if x.ndim == 1:
-        x = x.reshape(1, -1)
-    e = np.exp(x - x.max(axis=-1, keepdims=True))
-    return e / e.sum(axis=-1, keepdims=True)
-
-
-def _first_nonlegit(array) -> int | None:
-    """Trả về 1-based index của turn non-LEGIT đầu tiên, hoặc None."""
-    for i, v in enumerate(array):
-        if v != LEGIT:
-            return i + 1
+def _first_alert_turn(turn_probs: np.ndarray, threshold: float):
+    """0-based index của turn đầu tiên có p_t ≥ threshold, hoặc None."""
+    for i, p in enumerate(turn_probs):
+        if float(p) >= threshold:
+            return i
     return None

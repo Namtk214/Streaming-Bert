@@ -4,7 +4,13 @@ import os
 STREAMING_ROOT = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(STREAMING_ROOT)
 
-SPEAKER_MAP = {"normal": 0, "scammer": 1, "unknown": 2}
+# Speaker roles in raw data (handle common typos via normalize_role())
+# 0 = caller ("người gọi"), 1 = listener ("người nghe"), 2 = unknown
+ROLE_MAP = {"người gọi": 0, "người nghe": 1}
+
+# Conversation-level labels
+LABEL_MAP = {"harmless": 0, "scam": 1}
+LABEL_NAMES = {0: "harmless", 1: "scam"}
 
 
 @dataclass
@@ -19,8 +25,8 @@ class StreamingConfig:
     gru_hidden_size: int = 256
     gru_num_layers: int = 1
 
-    # Classifier
-    num_classes: int = 3  # 0=LEGIT, 1=SCAM, 2=AMBIGUOUS
+    # Classifier — 1 logit/turn, max-pool → dialogue logit, BCEWithLogitsLoss
+    num_classes: int = 1
 
     # Regularization
     head_dropout: float = 0.2
@@ -37,15 +43,14 @@ class StreamingConfig:
     num_epochs: int = 10
     batch_size: int = 2
 
-    # Data split
-    seed: int = 42
-    val_ratio: float = 0.15
-    test_ratio: float = 0.15
-
     # Inference
     threshold: float = 0.5
+    seed: int = 42
 
     # Paths
+    raw_data_dir: str = field(
+        default_factory=lambda: os.path.join(PROJECT_ROOT, "data")
+    )
     streaming_data_dir: str = field(
         default_factory=lambda: os.path.join(STREAMING_ROOT, "data")
     )

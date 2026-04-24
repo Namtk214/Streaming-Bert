@@ -1,40 +1,44 @@
 """
-Streaming Scam Detector – PhoBERT + uni-GRU.
+Streaming Scam Detector – PhoBERT + uni-GRU + Noisy-OR MIL loss.
 
 Kiến trúc:
   turn text u_t
     → PhoBERT turn encoder
     → masked mean pooling → e_t (768-dim)
     → uni-GRU → h_t (hidden_dim)
-    → 3-class classifier → logits (num_classes-dim)
-    → classes: 0=LEGIT, 1=SCAM, 2=AMBIGUOUS
+    → Linear(hidden, 1) + sigmoid → p_t ∈ [0,1]
 
-Forward (training):
-  input_ids [B,T,L] → flatten [B*T,L] → PhoBERT → pool → [B,T,768]
-  → GRU → [B,T,256] → classifier → [B,T,C]
-  masked CrossEntropyLoss theo turn_mask
+Training (weak supervision với dialogue-level label):
+  p_dialogue = 1 − ∏_{t=1}^{T} (1 − p_t)   [Noisy-OR]
+  loss = BCE(p_dialogue, y_dialogue)
 
-Forward (inference):
-  Từng turn 1: encode → GRU step với h_{t-1} → classify → lưu h_t
+  Tại sao Noisy-OR thay vì max-pool:
+  - Mọi turn đều nhận gradient (không chỉ turn có logit lớn nhất)
+  - Soft aggregation: nhiều turn đáng ngờ → xác suất dialogue tăng dần
+  - Gradient ∂p_d/∂p_t = ∏_{s≠t}(1−p_s) → turn nào còn "room" đều được update
+
+Inference (streaming):
+  Nhận từng turn, trả p_t = σ(logit_t).
+  is_scam = p_t ≥ threshold  (real-time alert)
 """
 
 import torch
 import torch.nn as nn
 from transformers import AutoModel
 
+_LOG_EPS = 1e-7   # clamp để tránh log(0)
+
 
 class StreamingScamDetector(nn.Module):
-    """PhoBERT per-turn encoder + uni-GRU + 3-class classification head."""
+    """PhoBERT per-turn encoder + uni-GRU + Noisy-OR binary head."""
 
     def __init__(self, config):
         super().__init__()
         self.config = config
 
-        # PhoBERT encoder
         self.encoder = AutoModel.from_pretrained(config.model_name)
         self.encoder_hidden_size = self.encoder.config.hidden_size  # 768
 
-        # uni-GRU conversation encoder
         self.gru = nn.GRU(
             input_size=self.encoder_hidden_size,
             hidden_size=config.gru_hidden_size,
@@ -44,93 +48,116 @@ class StreamingScamDetector(nn.Module):
             dropout=0.0,
         )
 
-        # 3-class classifier head
-        self.dropout = nn.Dropout(config.head_dropout)
-        self.classifier = nn.Linear(config.gru_hidden_size, config.num_classes)
+        self.dropout    = nn.Dropout(config.head_dropout)
+        self.classifier = nn.Linear(config.gru_hidden_size, 1)  # 1 logit/turn
 
-        # CrossEntropyLoss — reduction="none" để mask padding turns
-        self.loss_fn = nn.CrossEntropyLoss(reduction="none")
+        self.loss_fn = nn.BCELoss()   # input đã là probability
+
+    # ── Helpers ────────────────────────────────────────────────
 
     def masked_mean_pool(self, token_hidden, attention_mask):
-        """Masked mean pooling: [N, L, H] → [N, H]."""
-        mask_expanded = attention_mask.unsqueeze(-1).float()       # [N, L, 1]
-        sum_hidden = (token_hidden * mask_expanded).sum(dim=1)     # [N, H]
-        sum_mask = mask_expanded.sum(dim=1).clamp(min=1e-9)        # [N, 1]
-        return sum_hidden / sum_mask
+        """[N, L, H] → [N, H] via masked mean."""
+        mask_exp = attention_mask.unsqueeze(-1).float()
+        return (token_hidden * mask_exp).sum(1) / mask_exp.sum(1).clamp(min=1e-9)
 
-    def forward(self, input_ids, attention_mask, turn_mask, labels=None):
+    @staticmethod
+    def noisy_or(turn_probs: torch.Tensor, turn_mask: torch.Tensor) -> torch.Tensor:
+        """
+        Noisy-OR aggregation (log-space để tránh underflow).
+
+        p_dialogue = 1 − exp( Σ_{real turns} log(1 − p_t) )
+
+        Parameters
+        ----------
+        turn_probs : [B, T]   sigmoid probabilities per turn
+        turn_mask  : [B, T]   1=real turn, 0=padding
+
+        Returns
+        -------
+        [B]  dialogue-level probability
+        """
+        p_clamped = turn_probs.clamp(_LOG_EPS, 1.0 - _LOG_EPS)
+        log_complement = torch.log(1.0 - p_clamped)    # [B, T]
+        # padding turns đóng góp log(1) = 0 → không ảnh hưởng tích
+        log_complement = log_complement * turn_mask
+        log_prod = log_complement.sum(dim=1)            # [B]
+        return 1.0 - torch.exp(log_prod)                # [B]
+
+    # ── Training forward ───────────────────────────────────────
+
+    def forward(self, input_ids, attention_mask, turn_mask, dialogue_labels=None):
         """
         Parameters
         ----------
-        input_ids      : [B, T, L]
-        attention_mask : [B, T, L]
-        turn_mask      : [B, T]   – 1=turn thật, 0=padding
-        labels         : [B, T]   – class index (long), optional
+        input_ids        [B, T, L]
+        attention_mask   [B, T, L]
+        turn_mask        [B, T]    1=real, 0=padding
+        dialogue_labels  [B]       0/1 float, optional
 
         Returns
         -------
-        dict with 'loss' (if labels) and 'logits' [B, T, C]
+        dict:
+          loss           scalar | None
+          turn_probs     [B, T]   σ(logit_t) per turn
+          dialogue_probs [B]      Noisy-OR aggregated probability
         """
         B, T, L = input_ids.shape
 
-        # Flatten turns → encode
-        input_ids_flat = input_ids.view(B * T, L)
-        attention_mask_flat = attention_mask.view(B * T, L)
+        # ── Encode all turns ──
+        ids_flat  = input_ids.view(B * T, L)
+        mask_flat = attention_mask.view(B * T, L)
 
-        encoder_output = self.encoder(
-            input_ids=input_ids_flat,
-            attention_mask=attention_mask_flat,
-        )
-        token_hidden = encoder_output.last_hidden_state              # [B*T, L, 768]
+        enc_out = self.encoder(input_ids=ids_flat, attention_mask=mask_flat)
+        e_flat  = self.masked_mean_pool(enc_out.last_hidden_state, mask_flat)
+        x       = e_flat.view(B, T, -1)                              # [B, T, 768]
 
-        e_flat = self.masked_mean_pool(token_hidden, attention_mask_flat)  # [B*T, 768]
-        x = e_flat.view(B, T, -1)                                    # [B, T, 768]
-
-        # GRU với packed sequence
+        # ── GRU ──
         lengths = turn_mask.sum(dim=1).long().cpu()
-        packed = nn.utils.rnn.pack_padded_sequence(
+        packed  = nn.utils.rnn.pack_padded_sequence(
             x, lengths, batch_first=True, enforce_sorted=False
         )
-        rnn_out_packed, _ = self.gru(packed)
-        rnn_out, _ = nn.utils.rnn.pad_packed_sequence(
-            rnn_out_packed, batch_first=True, total_length=T
-        )                                                             # [B, T, hidden]
+        rnn_packed, _ = self.gru(packed)
+        rnn_out, _    = nn.utils.rnn.pad_packed_sequence(
+            rnn_packed, batch_first=True, total_length=T
+        )                                                             # [B, T, H]
 
-        # Classifier
-        rnn_out = self.dropout(rnn_out)
-        logits = self.classifier(rnn_out)                            # [B, T, C]
+        # ── Per-turn probability ──
+        rnn_out    = self.dropout(rnn_out)
+        logits     = self.classifier(rnn_out).squeeze(-1)            # [B, T]
+        turn_probs = torch.sigmoid(logits)                           # [B, T]
 
-        # Masked CrossEntropyLoss
+        # ── Noisy-OR → dialogue probability ──
+        dialogue_probs = self.noisy_or(turn_probs, turn_mask)        # [B]
+
+        # ── Loss ──
         loss = None
-        if labels is not None:
-            logits_flat = logits.view(B * T, -1)                     # [B*T, C]
-            labels_flat = labels.view(B * T).long()                  # [B*T]
-            loss_raw = self.loss_fn(logits_flat, labels_flat)        # [B*T]
-            loss_raw = loss_raw.view(B, T)
-            loss = (loss_raw * turn_mask).sum() / turn_mask.sum()
+        if dialogue_labels is not None:
+            loss = self.loss_fn(dialogue_probs, dialogue_labels.float())
 
-        return {"loss": loss, "logits": logits}
+        return {
+            "loss":           loss,
+            "turn_probs":     turn_probs,      # [B, T]
+            "dialogue_probs": dialogue_probs,  # [B]
+        }
+
+    # ── Streaming inference (1 turn at a time) ─────────────────
 
     def encode_single_turn(self, input_ids, attention_mask, h_prev=None):
         """
-        Encode 1 turn và update hidden state.
+        Encode 1 turn, update GRU hidden state, return p_t.
 
         Returns
         -------
-        probs : list[float]  – softmax probabilities [C]
-        h_new : Tensor [num_layers, 1, hidden]
+        prob_scam : float   σ(logit_t) ∈ [0, 1]
+        h_new     : Tensor  [num_layers, 1, H]
         """
         device = input_ids.device
 
         with torch.no_grad():
-            encoder_output = self.encoder(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-            )
-            token_hidden = encoder_output.last_hidden_state          # [1, L, 768]
-            e = self.masked_mean_pool(token_hidden, attention_mask)  # [1, 768]
+            enc_out   = self.encoder(input_ids=input_ids, attention_mask=attention_mask)
+            e         = self.masked_mean_pool(enc_out.last_hidden_state, attention_mask)
 
-        x = e.unsqueeze(1)                                           # [1, 1, 768]
+        x = e.unsqueeze(1)  # [1, 1, 768]
 
         if h_prev is None:
             h_prev = torch.zeros(
@@ -140,14 +167,15 @@ class StreamingScamDetector(nn.Module):
 
         with torch.no_grad():
             rnn_out, h_new = self.gru(x, h_prev)                    # [1,1,H], [L,1,H]
-            logits = self.classifier(rnn_out.squeeze(1))             # [1, C]
-            probs = torch.softmax(logits, dim=-1).squeeze(0)         # [C]
+            logit          = self.classifier(rnn_out.squeeze(1))     # [1, 1]
+            prob_scam      = torch.sigmoid(logit).item()
 
-        return probs.cpu().tolist(), h_new
+        return prob_scam, h_new
+
+    # ── Utilities ──────────────────────────────────────────────
 
     def get_param_groups(self, encoder_lr: float, rnn_head_lr: float):
-        encoder_params = []
-        other_params = []
+        encoder_params, other_params = [], []
         for name, param in self.named_parameters():
             if not param.requires_grad:
                 continue
@@ -159,7 +187,7 @@ class StreamingScamDetector(nn.Module):
         if encoder_params:
             groups.append({"params": encoder_params, "lr": encoder_lr})
         if other_params:
-            groups.append({"params": other_params, "lr": rnn_head_lr})
+            groups.append({"params": other_params,   "lr": rnn_head_lr})
         return groups
 
     def count_trainable_params(self) -> int:

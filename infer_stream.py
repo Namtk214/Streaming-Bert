@@ -1,39 +1,42 @@
 """
-Stateful Streaming Inference cho Scam Detection.
+Stateful Streaming Inference cho Binary Scam Detection.
 
 Mô phỏng inference online thực tế:
-  - Nhận turn mới → encode → GRU step → dự đoán
+  - Nhận turn mới → VnCoreNLP segment → PhoBERT encode → GRU step → p_t
   - Cache hidden state theo dialogue_id
-  - Không update gradient
+  - is_scam = p_t ≥ threshold  (real-time alert tại mỗi turn)
+  - VnCoreNLP bắt buộc
 
 Usage:
-    engine = StreamingInferenceEngine(model_path="streaming/outputs/best_model")
+    engine = StreamingInferenceEngine(
+        model_path="Streaming-Bert/outputs/best_model",
+        vncorenlp_dir="vncorenlp",
+    )
 
-    # Turn mới đến
-    result = engine.predict_turn("dlg_001", "Tôi là công an!", speaker="scammer")
-    print(result["probability"], result["is_scam"])
+    result = engine.predict_turn("dlg_001", "Tôi là công an!", speaker=ROLE_CALLER)
+    print(result["prob_scam"], result["is_scam"])
 
-    # Reset dialogue
     engine.reset("dlg_001")
 """
 
+import json
 import os
 import sys
-import json
 
-import numpy as np
 import torch
 from transformers import AutoTokenizer
 
-# Đảm bảo import từ streaming/ thay vì src/
 _streaming_dir = os.path.dirname(os.path.abspath(__file__))
 if _streaming_dir not in sys.path:
     sys.path.insert(0, _streaming_dir)
 
-from config import StreamingConfig, SPEAKER_MAP
+from config import StreamingConfig
 from model import StreamingScamDetector
+from prepare_data import WordSegmenter, clean_text
 
-# [Fix] Allowed safe globals cho PyTorch 2.6+ trên Colab (nơi ép weights_only=True)
+ROLE_CALLER   = "người gọi"
+ROLE_LISTENER = "người nghe"
+
 try:
     torch.serialization.add_safe_globals([StreamingConfig])
 except AttributeError:
@@ -42,47 +45,45 @@ except AttributeError:
 
 class StreamingInferenceEngine:
     """
-    Stateful streaming inference engine.
+    Stateful streaming inference (binary: harmless / scam).
 
-    Giữ hidden state theo dialogue_id,
-    mỗi turn mới chỉ cần forward 1 lần PhoBERT + 1 GRU step.
+    Giữ GRU hidden state theo dialogue_id.
+    Mỗi turn chỉ cần 1 lần forward PhoBERT + 1 GRU step.
     """
 
     def __init__(
         self,
         model_path: str,
-        vncorenlp_dir: str = None,
+        vncorenlp_dir: str,
         threshold: float = 0.5,
         device: str = None,
     ):
-        # Device
-        if device is None:
-            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        if device:
+            resolved_device = device
+        elif torch.cuda.is_available():
+            resolved_device = "cuda"
         else:
-            self.device = torch.device(device)
+            resolved_device = "cpu"
+        self.device = torch.device(resolved_device)
 
-        # Load config (JSON format, compatible with PyTorch 2.6+)
-        config_json_path = os.path.join(model_path, "config.json")
-        config_pt_path = os.path.join(model_path, "config.pt")
-        if os.path.exists(config_json_path):
-            with open(config_json_path, "r") as f:
-                config_dict = json.load(f)
+        # Load config
+        config_json = os.path.join(model_path, "config.json")
+        config_pt   = os.path.join(model_path, "config.pt")
+        if os.path.exists(config_json):
+            with open(config_json) as f:
+                cfg_dict = json.load(f)
             self.config = StreamingConfig(**{
-                k: v for k, v in config_dict.items()
+                k: v for k, v in cfg_dict.items()
                 if k in StreamingConfig.__dataclass_fields__
             })
-        elif os.path.exists(config_pt_path):
-            # Fallback for old checkpoints saved with torch.save
-            self.config = torch.load(config_pt_path, map_location="cpu", weights_only=False)
+        elif os.path.exists(config_pt):
+            self.config = torch.load(config_pt, map_location="cpu", weights_only=False)
         else:
             self.config = StreamingConfig()
 
         self.threshold = threshold
-
-        # Load tokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(model_path)
 
-        # Load model
         self.model = StreamingScamDetector(self.config)
         model_state = os.path.join(model_path, "model.pt")
         if os.path.exists(model_state):
@@ -92,40 +93,26 @@ class StreamingInferenceEngine:
         self.model.to(self.device)
         self.model.eval()
 
-        # Word segmenter (optional)
-        self.segmenter = None
-        if vncorenlp_dir:
-            try:
-                from prepare_streaming_data import WordSegmenter
-                self.segmenter = WordSegmenter(vncorenlp_dir)
-            except Exception:
-                pass
+        # VnCoreNLP bắt buộc
+        print("  Loading VnCoreNLP word segmenter...")
+        self.segmenter = WordSegmenter(vncorenlp_dir)
 
-        # Hidden state cache per dialogue
-        self._state_cache = {}
-
-        print(f"  StreamingInferenceEngine loaded on {self.device}")
+        self._state_cache: dict = {}
+        print(f"  StreamingInferenceEngine ready on {self.device}")
         print(f"  Threshold: {self.threshold}")
 
+    # ── Preprocessing ──────────────────────────────────────────
+
     def _preprocess(self, text: str) -> str:
-        """Clean + word segment text."""
-        import re
-        import unicodedata
+        return self.segmenter.segment(clean_text(text))
 
-        text = unicodedata.normalize("NFC", text)
-        text = re.sub(r"[\x00-\x09\x0b-\x0c\x0e-\x1f\x7f]", "", text)
-        text = re.sub(r"\s+", " ", text).strip()
-
-        if self.segmenter and self.segmenter.segmenter is not None:
-            text = self.segmenter.segment(text)
-
-        return text
+    # ── Predict single turn ────────────────────────────────────
 
     def predict_turn(
         self,
         dialogue_id: str,
         text: str,
-        speaker: str = "normal",
+        speaker: str = ROLE_CALLER,
     ) -> dict:
         """
         Dự đoán 1 turn mới.
@@ -133,73 +120,52 @@ class StreamingInferenceEngine:
         Parameters
         ----------
         dialogue_id : str
-            ID hội thoại (dùng để cache hidden state).
-        text : str
-            Nội dung turn (raw text, chưa segment).
-        speaker : str
-            "normal", "scammer", hoặc "unknown".
+        text        : str  – raw text (chưa segment)
+        speaker     : str  – ROLE_CALLER | ROLE_LISTENER
 
         Returns
         -------
         dict:
-            - probability: float, xác suất scam
-            - is_scam: bool, có vượt ngưỡng không
-            - turn_index: int, số thứ tự turn trong dialogue này
-            - dialogue_id: str
+            prob_scam     float  – σ(logit_t) ∈ [0,1]
+            prob_harmless float
+            is_scam       bool
+            predicted_label str  – "scam" | "harmless"
+            turn_index    int    – 1-based
+            dialogue_id   str
+            text_preview  str
         """
-        # Preprocess
-        text_processed = self._preprocess(text)
-
-        # Tokenize
         encoding = self.tokenizer(
-            text_processed,
+            self._preprocess(text),
             max_length=self.config.max_tokens_per_turn,
             padding="max_length",
             truncation=True,
             return_tensors="pt",
         )
-        input_ids = encoding["input_ids"].to(self.device)
+        input_ids      = encoding["input_ids"].to(self.device)
         attention_mask = encoding["attention_mask"].to(self.device)
 
-        # Get cached state
-        if dialogue_id in self._state_cache:
-            h_prev = self._state_cache[dialogue_id]["hidden"]
-            turn_idx = self._state_cache[dialogue_id]["turn_index"] + 1
-        else:
-            h_prev = None
-            turn_idx = 1
+        cache    = self._state_cache.get(dialogue_id)
+        h_prev   = cache["hidden"]      if cache else None
+        turn_idx = cache["turn_index"] + 1 if cache else 1
 
-        # Forward (no grad)
-        probs, h_new = self.model.encode_single_turn(
-            input_ids, attention_mask, h_prev
-        )
-        # probs: [p_legit, p_scam, p_ambiguous]
-        pred_class = int(np.argmax(probs))
-        prob_scam = float(probs[1])
-        prob_ambiguous = float(probs[2])
+        prob_scam, h_new = self.model.encode_single_turn(input_ids, attention_mask, h_prev)
+        is_scam = prob_scam >= self.threshold
 
-        is_scam = pred_class in (1, 2)  # SCAM hoặc AMBIGUOUS đều alert
+        self._state_cache[dialogue_id] = {"hidden": h_new, "turn_index": turn_idx}
 
-        # Cache state
-        self._state_cache[dialogue_id] = {
-            "hidden": h_new,
-            "turn_index": turn_idx,
-        }
-
-        class_names = {0: "LEGIT", 1: "SCAM", 2: "AMBIGUOUS"}
         return {
-            "dialogue_id": dialogue_id,
-            "turn_index": turn_idx,
-            "predicted_class": pred_class,
-            "predicted_label": class_names[pred_class],
-            "prob_legit":     round(float(probs[0]), 4),
-            "prob_scam":      round(prob_scam, 4),
-            "prob_ambiguous": round(prob_ambiguous, 4),
-            "probability": round(prob_scam + prob_ambiguous, 4),  # compat với visualize
-            "is_scam": bool(is_scam),
-            "speaker": speaker,
-            "text_preview": text,
+            "dialogue_id":     dialogue_id,
+            "turn_index":      turn_idx,
+            "predicted_label": "scam" if is_scam else "harmless",
+            "prob_scam":       round(prob_scam, 4),
+            "prob_harmless":   round(1.0 - prob_scam, 4),
+            "probability":     round(prob_scam, 4),  # compat với visualize
+            "is_scam":         bool(is_scam),
+            "speaker":         speaker,
+            "text_preview":    text,
         }
+
+    # ── Predict full conversation ──────────────────────────────
 
     def predict_conversation(self, messages: list, dialogue_id: str = "temp") -> list:
         """
@@ -207,122 +173,80 @@ class StreamingInferenceEngine:
 
         Parameters
         ----------
-        messages : list of dict
-            Mỗi dict có keys: "text", "speaker_role"
-        dialogue_id : str
-            ID hội thoại
-
-        Returns
-        -------
-        list of dict: kết quả dự đoán cho từng turn
+        messages : list of dict  – mỗi dict có "text" và "speaker_role" (optional)
         """
         self.reset(dialogue_id)
-        results = []
-
-        for msg in messages:
-            result = self.predict_turn(
+        return [
+            self.predict_turn(
                 dialogue_id=dialogue_id,
                 text=msg["text"],
-                speaker=msg.get("speaker_role", "unknown"),
+                speaker=msg.get("speaker_role", ROLE_CALLER),
             )
-            results.append(result)
+            for msg in messages
+        ]
 
-        return results
+    # ── State management ───────────────────────────────────────
 
     def reset(self, dialogue_id: str):
         """Reset hidden state cho 1 dialogue."""
-        if dialogue_id in self._state_cache:
-            del self._state_cache[dialogue_id]
+        self._state_cache.pop(dialogue_id, None)
 
     def reset_all(self):
         """Reset toàn bộ cache."""
         self._state_cache.clear()
 
     def get_active_dialogues(self) -> list:
-        """Danh sách dialogue đang active."""
         return list(self._state_cache.keys())
 
 
-# ============================================================
-# Demo
-# ============================================================
+# ── Demo ───────────────────────────────────────────────────────
+
 def demo():
-    """Demo streaming inference."""
     print("=" * 60)
     print("STREAMING INFERENCE DEMO")
     print("=" * 60)
 
-    # Check model exists
     cfg = StreamingConfig()
     model_path = os.path.join(cfg.output_dir, "best_model")
 
     if not os.path.exists(os.path.join(model_path, "model.pt")):
-        print(f"\n  Model chưa train! File không tồn tại: {model_path}/model.pt")
-        print("  Chạy train.py trước.")
-        print("\n  Demo với fake predictions thay thế...\n")
-
-        # Fake demo
-        print("  Ví dụ sử dụng:")
-        print("""
-    engine = StreamingInferenceEngine(
-        model_path="streaming/outputs/best_model",
-        vncorenlp_dir="vncorenlp",
-        threshold=0.5,
-    )
-
-    # Scam conversation
-    messages = [
-        {"speaker_role": "normal", "text": "Alo ai đấy?"},
-        {"speaker_role": "scammer", "text": "Tôi là công an, bạn đang bị điều tra!"},
-        {"speaker_role": "normal", "text": "Cái gì ạ?"},
-        {"speaker_role": "scammer", "text": "Chuyển tiền ngay!"},
-    ]
-
-    results = engine.predict_conversation(messages, "dlg_001")
-    for r in results:
-        alert = "[!] SCAM!" if r["is_scam"] else "[OK]"
-        print(f"  Turn {r['turn_index']}: prob={r['probability']:.3f} {alert}")
-        """)
+        print("\n  Model chưa train! Chạy train.py trước.")
+        print(f"  Expected: {model_path}/model.pt")
         return
 
-    # Real demo
     engine = StreamingInferenceEngine(
         model_path=model_path,
         vncorenlp_dir=cfg.vncorenlp_dir,
         threshold=cfg.threshold,
     )
 
-    # Test scam conversation
-    scam_messages = [
-        {"speaker_role": "normal", "text": "Alo ai đấy ạ?"},
-        {"speaker_role": "scammer",
-         "text": "Tôi là Đại úy Nguyễn Văn Hùng, Công an thành phố. Bạn đang bị điều tra vì liên quan đến đường dây rửa tiền."},
-        {"speaker_role": "normal", "text": "Cái gì ạ? Tôi không biết gì cả."},
-        {"speaker_role": "scammer",
-         "text": "Chuyển tiền vào tài khoản an toàn ngay trong vòng 30 phút, nếu không sẽ bị bắt."},
+    scam_msgs = [
+        {"speaker_role": ROLE_LISTENER, "text": "Đây có phải anh Nam không ạ?"},
+        {"speaker_role": ROLE_CALLER,  "text": "Đúng rồi, ai đầu dây vậy?"},
+        {"speaker_role": ROLE_LISTENER,
+         "text": "Em là nhân viên ngân hàng BIDV. Thẻ của anh sắp hết hạn, "
+                 "anh cần cung cấp số thẻ và CVV để gia hạn ngay hôm nay."},
+        {"speaker_role": ROLE_CALLER,  "text": "Thẻ tôi vẫn dùng được mà?"},
+        {"speaker_role": ROLE_LISTENER,
+         "text": "Hệ thống mới cập nhật, nếu không gia hạn ngay thẻ sẽ bị khóa."},
     ]
 
-    print("\n  -- Test SCAM conversation --")
-    results = engine.predict_conversation(scam_messages, "test_scam")
-    for r in results:
-        alert = "[!] SCAM!" if r["is_scam"] else "[OK]"
-        print(f"  Turn {r['turn_index']}: {r['text_preview'][:40]}... "
-              f"prob={r['probability']:.3f} {alert}")
+    print("\n  -- Test SCAM --")
+    for r in engine.predict_conversation(scam_msgs, "demo_scam"):
+        tag = "[SCAM]" if r["is_scam"] else "[OK]  "
+        print(f"  Turn {r['turn_index']} {tag} p={r['prob_scam']:.3f} | {r['text_preview'][:55]}")
 
-    # Test legit conversation
-    legit_messages = [
-        {"speaker_role": "normal", "text": "Alo bạn ơi, chiều nay đi cà phê không?"},
-        {"speaker_role": "normal", "text": "Oke, mấy giờ?"},
-        {"speaker_role": "normal", "text": "3 giờ nhé, quán trên Nguyễn Huệ."},
-        {"speaker_role": "normal", "text": "Được rồi, hẹn gặp!"},
+    harmless_msgs = [
+        {"speaker_role": ROLE_LISTENER, "text": "A lô, có bưu phẩm của anh đây ạ."},
+        {"speaker_role": ROLE_CALLER,  "text": "Ừ, anh để ở đâu vậy?"},
+        {"speaker_role": ROLE_LISTENER, "text": "Em để ở phòng bảo vệ rồi ạ, anh xuống lấy nhé."},
+        {"speaker_role": ROLE_CALLER,  "text": "OK cảm ơn em."},
     ]
 
-    print("\n  -- Test LEGIT conversation --")
-    results = engine.predict_conversation(legit_messages, "test_legit")
-    for r in results:
-        alert = "[!] SCAM!" if r["is_scam"] else "[OK]"
-        print(f"  Turn {r['turn_index']}: {r['text_preview'][:40]}... "
-              f"prob={r['probability']:.3f} {alert}")
+    print("\n  -- Test HARMLESS --")
+    for r in engine.predict_conversation(harmless_msgs, "demo_harmless"):
+        tag = "[SCAM]" if r["is_scam"] else "[OK]  "
+        print(f"  Turn {r['turn_index']} {tag} p={r['prob_scam']:.3f} | {r['text_preview'][:55]}")
 
 
 if __name__ == "__main__":

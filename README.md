@@ -27,19 +27,17 @@ Streaming-Bert/
 ├── README.md
 ├── config.py                  # Cấu hình hyperparameters
 ├── generate_data.py           # Tạo dữ liệu synthetic để test
-├── prepare_excel_dataset.py   # Chuyển Excel → raw JSON + streaming dataset
-├── prepare_streaming_data.py  # Chuyển raw JSON → streaming dataset
+├── prepare_data.py            # Chuyển raw train/val/test JSON → streaming dataset
 ├── dataset.py                 # Dataset + collate_fn (padding 2 cấp)
 ├── model.py                   # PhoBERT + GRU + binary head
 ├── metrics.py                 # Streaming metrics (F1, AUROC, delay...)
-├── train.py                   # Training loop (staged freezing)
+├── train.py                   # Training loop (Noisy-OR MIL)
 ├── infer_stream.py            # Stateful online inference
 ├── visualize.py               # Gradio demo UI
 ├── data/
-│   ├── excel_raw_conversations.json  # Raw JSON convert từ Excel
-│   ├── train.json                    # Training set (streaming format)
-│   ├── val.json                      # Validation set
-│   └── test.json                     # Test set
+│   ├── train.json              # Training set (streaming format)
+│   ├── val.json                # Validation set
+│   └── test.json               # Test set
 └── outputs/
     └── best_model/                   # Model đã train
         ├── model.pt
@@ -62,12 +60,21 @@ pip install py_vncorenlp
 ```bash
 cd Streaming-Bert
 
+python prepare_data.py
+```
 
-python prepare_streaming_data.py data/raw_conversations.json
+Mặc định script đọc raw data từ `../data/train.json`, `../data/val.json`, `../data/test.json` và ghi output vào `Streaming-Bert/data/`.
+
+Có thể truyền path khác nếu cần:
+
+```bash
+python prepare_data.py \
+  --raw-dir ../data \
+  --out-dir data \
+  --vncorenlp-dir ../vncorenlp
 ```
 
 Output:
-- `data/raw_conversations.json` (raw JSON trung gian, nếu dùng Excel converter)
 - `data/train.json`
 - `data/val.json`
 - `data/test.json`
@@ -87,13 +94,7 @@ python train.py
 ```
 
 
-**Staged training:**
-
-| Stage | Epochs | PhoBERT | Trainable params |
-|-------|--------|---------|-----------------|
-| A | 1-3 | Frozen hoàn toàn | ~800K |
-| B | 4-6 | Top 2 layers unfrozen | ~15M |
-| C | 7+ | Top 4 layers unfrozen | ~29M |
+PhoBERT được fine-tune end-to-end từ epoch đầu. Optimizer dùng learning rate riêng cho encoder và GRU/head.
 
 ### 4. Inference (streaming)
 
@@ -150,23 +151,25 @@ python visualize.py
 
 ### Input (raw conversations)
 
-`prepare_streaming_data.py` nhận một file JSON là danh sách conversations. Với dữ liệu Excel đã convert, file raw trung gian là `data/excel_raw_conversations.json`.
+`prepare_data.py` đọc các file `train.json`, `val.json`, `test.json` trong raw data folder. Mỗi file là danh sách conversations theo format:
 
 ```json
 {
-  "conversation_id": "conv_0001",
-  "t1_label": "SCAM",
-  "messages": [
+  "_id": "conv_0001",
+  "label": "scam",
+  "source_split": "train",
+  "turns": [
     {
-      "turn_id": "conv_0001_t01",
-      "speaker_role": "normal",
-      "text": "Alo ai đấy?"
+      "turn_idx": 0,
+      "role": "người gọi",
+      "content": "Alo ai đấy?",
+      "tactic_tags": []
     },
     {
-      "turn_id": "conv_0001_t02",
-      "speaker_role": "scammer",
-      "text": "Tôi là công an...",
-      "t4_labels": ["AUTHORITY", "THREAT_LEGAL"]
+      "turn_idx": 1,
+      "role": "người nghe",
+      "content": "Tôi là công an...",
+      "tactic_tags": ["AUTHORITY", "THREAT_LEGAL"]
     }
   ]
 }
@@ -177,31 +180,37 @@ python visualize.py
 ```json
 {
   "dialogue_id": "conv_0001",
-  "conversation_label": "SCAM",
+  "conversation_label": "scam",
   "turns": [
     {
       "turn_id": 1,
       "speaker": 0,
       "text": "Alo ai đấy?",
       "text_segmented": "Alo ai đấy ?",
-      "scam_label": 0
+      "turn_label": 1
     },
     {
       "turn_id": 2,
       "speaker": 1,
       "text": "Tôi là công an...",
       "text_segmented": "Tôi là công_an ...",
-      "scam_label": 1
+      "turn_label": 1
     }
   ]
 }
 ```
 
-**Binary label theo prefix rule:**
-- `SCAM`/`AMBIGUOUS`: label=0 trước khi có bằng chứng, label=1 từ turn scammer đầu tiên
-- `LEGIT`: toàn bộ label=0
+**Conversation label:**
+- `scam`: dialogue positive
+- `harmless`: dialogue negative
 
-**Speaker encoding:** `normal=0`, `scammer=1`, `unknown=2`
+**Turn label hiện tại trong `prepare_data.py`:**
+- Dialogue `harmless`: mọi turn có `turn_label=0`
+- Dialogue `scam`: mọi turn có `turn_label=1`
+
+Model hiện tại train bằng dialogue-level label qua Noisy-OR MIL; `turn_label` chỉ được giữ trong data để tham khảo.
+
+**Speaker encoding:** `người gọi=0`, `người nghe=1`, `unknown=2`
 
 ## Metrics
 
@@ -238,7 +247,6 @@ python visualize.py
 3. **LR khác nhau** cho encoder vs RNN — LR cao phá pretrained weights
 4. **Word segment tiếng Việt** trước khi tokenize — cải thiện chất lượng PhoBERT
 5. **Không fix threshold=0.5** — nên tune trên validation set
-
 
 
 
