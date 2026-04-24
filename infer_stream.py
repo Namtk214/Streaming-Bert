@@ -21,7 +21,9 @@ Usage:
 
 import json
 import os
+import re
 import sys
+import unicodedata
 
 import torch
 from transformers import AutoTokenizer
@@ -32,15 +34,63 @@ if _streaming_dir not in sys.path:
 
 from config import StreamingConfig
 from model import StreamingScamDetector
-from prepare_data import WordSegmenter, clean_text
 
 ROLE_CALLER   = "người gọi"
 ROLE_LISTENER = "người nghe"
+_SEGMENTER_CACHE = {}
 
 try:
     torch.serialization.add_safe_globals([StreamingConfig])
 except AttributeError:
     pass
+
+
+def clean_text(text: str) -> str:
+    text = unicodedata.normalize("NFC", text)
+    text = re.sub(r"[\x00-\x09\x0b-\x0c\x0e-\x1f\x7f]", "", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def _missing_vncorenlp_files(vncorenlp_dir: str):
+    required = [
+        os.path.join(vncorenlp_dir, "VnCoreNLP-1.2.jar"),
+        os.path.join(vncorenlp_dir, "models", "wordsegmenter", "vi-vocab"),
+        os.path.join(vncorenlp_dir, "models", "wordsegmenter", "wordsegmenter.rdr"),
+    ]
+    return [p for p in required if not os.path.exists(p)]
+
+
+class InferenceWordSegmenter:
+    """Strict VnCoreNLP loader for inference. Never downloads files."""
+
+    def __init__(self, vncorenlp_dir: str):
+        vncorenlp_dir = os.path.abspath(vncorenlp_dir)
+        if vncorenlp_dir in _SEGMENTER_CACHE:
+            self.segmenter = _SEGMENTER_CACHE[vncorenlp_dir]
+            print("  VnCoreNLP reused OK")
+            return
+
+        missing = _missing_vncorenlp_files(vncorenlp_dir)
+        if missing:
+            missing_rel = [os.path.relpath(p, vncorenlp_dir) for p in missing]
+            raise FileNotFoundError(
+                "VnCoreNLP directory is missing required files: "
+                f"{missing_rel}. This inference loader never downloads files; "
+                "pass the folder that already contains VnCoreNLP."
+            )
+
+        import py_vncorenlp
+
+        self.segmenter = py_vncorenlp.VnCoreNLP(
+            annotators=["wseg"], save_dir=vncorenlp_dir
+        )
+        _SEGMENTER_CACHE[vncorenlp_dir] = self.segmenter
+        print("  VnCoreNLP loaded OK")
+
+    def segment(self, text: str) -> str:
+        result = self.segmenter.word_segment(text)
+        return " ".join(result) if isinstance(result, list) else result
 
 
 class StreamingInferenceEngine:
@@ -101,7 +151,7 @@ class StreamingInferenceEngine:
             if vncorenlp_dir is None:
                 vncorenlp_dir = self.config.vncorenlp_dir
             print("  Loading VnCoreNLP word segmenter...")
-            self.segmenter = WordSegmenter(vncorenlp_dir)
+            self.segmenter = InferenceWordSegmenter(vncorenlp_dir)
 
         self._state_cache: dict = {}
         print(f"  StreamingInferenceEngine ready on {self.device}")
