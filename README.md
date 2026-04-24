@@ -103,7 +103,7 @@ from infer_stream import StreamingInferenceEngine
 
 engine = StreamingInferenceEngine(
     model_path="outputs/best_model",
-    vncorenlp_dir="vncorenlp",   # optional
+    vncorenlp_dir="vncorenlp",
     threshold=0.5,
 )
 
@@ -141,7 +141,19 @@ Giao diện trực quan để demo model với 3 chế độ:
 # Trên Google Colab
 !pip install gradio
 from visualize import launch_app
-launch_app(model_path="outputs/best_model", share=True)
+launch_app(
+    model_path="outputs/best_model",
+    vncorenlp_dir="vncorenlp",
+    share=True,
+)
+
+# Neu da co WordSegmenter trong cung notebook/process, truyen thang vao
+# de khong khoi tao VnCoreNLP lan nua:
+launch_app(
+    model_path="outputs/best_model",
+    segmenter=segmenter,
+    share=True,
+)
 
 # Local
 python visualize.py
@@ -247,7 +259,6 @@ Model hiện tại train bằng dialogue-level label qua Noisy-OR MIL; `turn_lab
 3. **LR khác nhau** cho encoder vs RNN — LR cao phá pretrained weights
 4. **Word segment tiếng Việt** trước khi tokenize — cải thiện chất lượng PhoBERT
 5. **Không fix threshold=0.5** — nên tune trên validation set
-
 
 
 

@@ -431,7 +431,7 @@ def create_app(engine: StreamingInferenceEngine):
 # ============================================================
 # Launch helpers
 # ============================================================
-def launch_app(model_path=None, vncorenlp_dir=None, share=True):
+def launch_app(model_path=None, vncorenlp_dir=None, share=True, segmenter=None):
     """
     Khoi dong Gradio app.
 
@@ -440,20 +440,29 @@ def launch_app(model_path=None, vncorenlp_dir=None, share=True):
     model_path : str
         Duong dan den thu muc best_model (chua model.pt, config.json, tokenizer)
     vncorenlp_dir : str
-        Duong dan den thu muc vncorenlp (optional)
+        Duong dan den thu muc vncorenlp. Neu None thi dung StreamingConfig.vncorenlp_dir.
     share : bool
         Tao public link (cho Colab)
+    segmenter :
+        VnCoreNLP segmenter da load san. Neu truyen vao thi khong load VnCoreNLP lai.
     """
+    cfg = StreamingConfig()
     if model_path is None:
-        cfg = StreamingConfig()
         model_path = os.path.join(cfg.output_dir, "best_model")
+    if vncorenlp_dir is None and segmenter is None:
+        vncorenlp_dir = cfg.vncorenlp_dir
 
     print(f"Loading model from: {model_path}")
+    if segmenter is None:
+        print(f"Loading VnCoreNLP from: {vncorenlp_dir}")
+    else:
+        print("Using existing VnCoreNLP segmenter")
 
     engine = StreamingInferenceEngine(
         model_path=model_path,
         vncorenlp_dir=vncorenlp_dir,
         threshold=0.5,
+        segmenter=segmenter,
     )
 
     app = create_app(engine)

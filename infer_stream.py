@@ -54,9 +54,10 @@ class StreamingInferenceEngine:
     def __init__(
         self,
         model_path: str,
-        vncorenlp_dir: str,
+        vncorenlp_dir: str = None,
         threshold: float = 0.5,
         device: str = None,
+        segmenter=None,
     ):
         if device:
             resolved_device = device
@@ -93,9 +94,14 @@ class StreamingInferenceEngine:
         self.model.to(self.device)
         self.model.eval()
 
-        # VnCoreNLP bắt buộc
-        print("  Loading VnCoreNLP word segmenter...")
-        self.segmenter = WordSegmenter(vncorenlp_dir)
+        if segmenter is not None:
+            print("  Using existing VnCoreNLP word segmenter")
+            self.segmenter = segmenter
+        else:
+            if vncorenlp_dir is None:
+                vncorenlp_dir = self.config.vncorenlp_dir
+            print("  Loading VnCoreNLP word segmenter...")
+            self.segmenter = WordSegmenter(vncorenlp_dir)
 
         self._state_cache: dict = {}
         print(f"  StreamingInferenceEngine ready on {self.device}")
