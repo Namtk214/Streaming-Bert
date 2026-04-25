@@ -4,7 +4,7 @@ Stateful Streaming Inference cho Binary Scam Detection.
 Mô phỏng inference online thực tế:
   - Nhận turn mới → VnCoreNLP segment → PhoBERT encode → GRU step → p_t
   - Cache hidden state theo dialogue_id
-  - is_scam = p_t ≥ threshold  (real-time alert tại mỗi turn)
+  - is_scam = p_≤t ≥ threshold  (Noisy-OR prefix score, nhất quán với training)
   - VnCoreNLP bắt buộc
 
 Usage:
@@ -20,6 +20,7 @@ Usage:
 """
 
 import json
+import math
 import os
 import re
 import sys
@@ -199,22 +200,36 @@ class StreamingInferenceEngine:
         input_ids      = encoding["input_ids"].to(self.device)
         attention_mask = encoding["attention_mask"].to(self.device)
 
-        cache    = self._state_cache.get(dialogue_id)
-        h_prev   = cache["hidden"]      if cache else None
-        turn_idx = cache["turn_index"] + 1 if cache else 1
+        _LOG_EPS = 1e-7
 
-        prob_scam, h_new = self.model.encode_single_turn(input_ids, attention_mask, h_prev)
-        is_scam = prob_scam >= self.threshold
+        cache        = self._state_cache.get(dialogue_id)
+        h_prev       = cache["hidden"]           if cache else None
+        turn_idx     = cache["turn_index"] + 1   if cache else 1
+        log_comp_prev = cache["log_complement"]  if cache else 0.0  # log(1 - p_≤(t-1))
 
-        self._state_cache[dialogue_id] = {"hidden": h_new, "turn_index": turn_idx}
+        q_t, h_new = self.model.encode_single_turn(input_ids, attention_mask, h_prev)
+
+        # Noisy-OR prefix score: p_≤t = 1 − ∏_{i=1}^{t}(1−q_i)
+        q_clamped     = min(max(q_t, _LOG_EPS), 1.0 - _LOG_EPS)
+        log_comp_new  = log_comp_prev + math.log(1.0 - q_clamped)
+        prefix_prob   = 1.0 - math.exp(log_comp_new)
+
+        is_scam = prefix_prob >= self.threshold
+
+        self._state_cache[dialogue_id] = {
+            "hidden":         h_new,
+            "turn_index":     turn_idx,
+            "log_complement": log_comp_new,
+        }
 
         return {
             "dialogue_id":     dialogue_id,
             "turn_index":      turn_idx,
             "predicted_label": "scam" if is_scam else "harmless",
-            "prob_scam":       round(prob_scam, 4),
-            "prob_harmless":   round(1.0 - prob_scam, 4),
-            "probability":     round(prob_scam, 4),  # compat với visualize
+            "prob_scam":       round(prefix_prob, 4),
+            "prob_harmless":   round(1.0 - prefix_prob, 4),
+            "probability":     round(prefix_prob, 4),  # compat với visualize
+            "turn_prob":       round(q_t, 4),          # raw q_t để debug
             "is_scam":         bool(is_scam),
             "speaker":         speaker,
             "text_preview":    text,

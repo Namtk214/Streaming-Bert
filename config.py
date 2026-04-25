@@ -23,7 +23,7 @@ class StreamingConfig:
 
     # PhoBERT turn encoder
     model_name: str = "vinai/phobert-base-v2"
-    max_tokens_per_turn: int = 128
+    max_tokens_per_turn: int = 256
 
     # GRU conversation encoder
     gru_hidden_size: int = 256
@@ -33,7 +33,7 @@ class StreamingConfig:
     num_classes: int = 1
 
     # Regularization
-    head_dropout: float = 0.2
+    head_dropout: float = 0.1
 
     # Optimizer
     encoder_lr: float = 2e-5
@@ -45,7 +45,7 @@ class StreamingConfig:
 
     # Training
     num_epochs: int = 10
-    batch_size: int = 2
+    batch_size: int = 4
 
     # Inference
     threshold: float = 0.5
