@@ -250,7 +250,7 @@ def train(cfg: StreamingConfig = None):
     total_steps  = len(train_loader) * cfg.num_epochs
     warmup_steps = int(total_steps * cfg.warmup_ratio)
 
-    param_groups = model.get_param_groups(cfg.encoder_lr, cfg.rnn_head_lr)
+    param_groups = model.get_param_groups(cfg.rnn_head_lr)
     optimizer = AdamW(
         param_groups, lr=cfg.encoder_lr,
         weight_decay=cfg.weight_decay, eps=cfg.adam_epsilon,

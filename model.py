@@ -177,21 +177,9 @@ class StreamingScamDetector(nn.Module):
 
     # ── Utilities ──────────────────────────────────────────────
 
-    def get_param_groups(self, encoder_lr: float, rnn_head_lr: float):
-        encoder_params, other_params = [], []
-        for name, param in self.named_parameters():
-            if not param.requires_grad:
-                continue
-            if name.startswith("encoder."):
-                encoder_params.append(param)
-            else:
-                other_params.append(param)
-        groups = []
-        if encoder_params:
-            groups.append({"params": encoder_params, "lr": encoder_lr})
-        if other_params:
-            groups.append({"params": other_params,   "lr": rnn_head_lr})
-        return groups
+    def get_param_groups(self, rnn_head_lr: float):
+        trainable = [p for p in self.parameters() if p.requires_grad]
+        return [{"params": trainable, "lr": rnn_head_lr}]
 
     def count_trainable_params(self) -> int:
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
