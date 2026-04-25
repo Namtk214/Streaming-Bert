@@ -38,6 +38,9 @@ class StreamingScamDetector(nn.Module):
 
         self.encoder = AutoModel.from_pretrained(config.model_name)
         self.encoder_hidden_size = self.encoder.config.hidden_size  # 768
+        # Freeze PhoBERT parameters (chỉ train GRU + head)
+        for p in self.encoder.parameters():
+            p.requires_grad = False
 
         self.gru = nn.GRU(
             input_size=self.encoder_hidden_size,
