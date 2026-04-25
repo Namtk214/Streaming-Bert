@@ -252,7 +252,7 @@ def train(cfg: StreamingConfig = None):
 
     param_groups = model.get_param_groups(cfg.rnn_head_lr)
     optimizer = AdamW(
-        param_groups, lr=cfg.encoder_lr,
+        param_groups, lr=cfg.rnn_head_lr,
         weight_decay=cfg.weight_decay, eps=cfg.adam_epsilon,
     )
     scheduler = get_cosine_schedule_with_warmup(
