@@ -70,8 +70,6 @@ Có thể truyền path khác nếu cần:
 ```bash
 python prepare_data.py \
   --raw-dir ../data \
-  --out-dir data \
-  --vncorenlp-dir ../vncorenlp
 ```
 
 Output:
