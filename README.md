@@ -142,6 +142,7 @@ Sau khi chạy `prepare_data.py`:
 ### 1. Cài đặt dependencies
 
 ```bash
+apt-get install -y default-jdk
 pip install torch transformers py_vncorenlp scikit-learn numpy
 pip install gradio  # optional, cho visualization
 ```
