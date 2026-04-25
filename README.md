@@ -130,7 +130,36 @@ for r in results:
 engine.reset("dlg_001")
 ```
 
-### 5. Visualization (Gradio)
+### 5. Test trên dữ liệu Excel
+
+Dùng khi có file Excel kịch bản test (Sheet1 = scam, no_scam = harmless). Workflow 2 bước:
+
+**Bước 1 — Convert Excel → JSON** (chạy 1 lần, mất thời gian do VnCoreNLP):
+
+```bash
+python convert_excel.py
+# hoặc chỉ định path:
+python convert_excel.py \
+  --excel "../Tổng hợp kịch bản test AI on devices_result_v2.xlsx" \
+  --out data/excel_test.json
+```
+
+Output: `data/excel_test.json` — cùng format với train/val/test.json, có `text_segmented`.
+
+**Bước 2 — Chạy model evaluation**:
+
+```bash
+python test.py
+
+# Tuỳ chọn:
+python test.py --threshold 0.4        # thử threshold khác
+python test.py --verbose              # in turn probs từng dialogue
+python test.py --verbose --max-verbose 10
+```
+
+Output báo cáo đầy đủ: Accuracy, F1, AUROC, Detection rate, Avg delay, False alarm rate.
+
+### 6. Visualization (Gradio)
 
 Giao diện trực quan để demo model với 3 chế độ:
 - **Chat Mode**: Nhập từng turn, xem kết quả real-time (mô phỏng streaming)
@@ -232,17 +261,15 @@ Model hiện tại train bằng dialogue-level label qua Noisy-OR MIL; `turn_lab
 
 | Param | Giá trị | Ghi chú |
 |-------|---------|---------|
-| PhoBERT | `vinai/phobert-base-v2` | Pretrained encoder |
-| Max tokens/turn | 128 | Truncate turn dài |
+| PhoBERT | `vinai/phobert-base-v2` | Frozen encoder |
+| Max tokens/turn | 256 | Truncate turn dài |
 | GRU hidden | 256 | 1 layer, unidirectional |
-| Speaker embed | 16-dim | 3 speakers |
-| Dropout (head) | 0.2 | |
-| Encoder LR | 2e-5 | Cho PhoBERT layers |
-| RNN/Head LR | 1e-4 | Cho GRU + classifier |
+| Dropout (head) | 0.1 | |
+| RNN/Head LR | 1e-4 | Chỉ train GRU + classifier |
 | Weight decay | 0.01 | AdamW |
 | Grad clip | 1.0 | |
 | Warmup ratio | 0.1 | Cosine schedule |
-| Batch size | 2 | Số dialogues/batch |
+| Batch size | 4 | Số dialogues/batch |
 
 ## Lưu ý quan trọng
 
