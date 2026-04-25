@@ -34,7 +34,7 @@ _streaming_dir = os.path.dirname(os.path.abspath(__file__))
 if _streaming_dir not in sys.path:
     sys.path.insert(0, _streaming_dir)
 
-from config import StreamingConfig, LABEL_MAP
+from config import StreamingConfig, LABEL_MAP, VNCORENLP_CACHE
 
 cfg = StreamingConfig()
 
@@ -74,14 +74,20 @@ class WordSegmenter:
 
     def __init__(self, vncorenlp_dir: str):
         import py_vncorenlp
-        jar = os.path.join(vncorenlp_dir, "VnCoreNLP-1.2.jar")
+        abs_dir = os.path.abspath(vncorenlp_dir)
+        if abs_dir in VNCORENLP_CACHE:
+            self.segmenter = VNCORENLP_CACHE[abs_dir]
+            print("  VnCoreNLP reused from cache")
+            return
+        jar = os.path.join(abs_dir, "VnCoreNLP-1.2.jar")
         if not os.path.exists(jar):
-            print(f"  Downloading VnCoreNLP into {vncorenlp_dir} ...")
-            os.makedirs(vncorenlp_dir, exist_ok=True)
-            py_vncorenlp.download_model(save_dir=vncorenlp_dir)
+            print(f"  Downloading VnCoreNLP into {abs_dir} ...")
+            os.makedirs(abs_dir, exist_ok=True)
+            py_vncorenlp.download_model(save_dir=abs_dir)
         self.segmenter = py_vncorenlp.VnCoreNLP(
-            annotators=["wseg"], save_dir=vncorenlp_dir
+            annotators=["wseg"], save_dir=abs_dir
         )
+        VNCORENLP_CACHE[abs_dir] = self.segmenter
         print("  VnCoreNLP loaded OK")
 
     def segment(self, text: str) -> str:

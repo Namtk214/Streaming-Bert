@@ -108,16 +108,16 @@ engine = StreamingInferenceEngine(
 )
 
 # Simulate từng turn đến
-engine.predict_turn("dlg_001", "Alo ai đấy?", speaker="normal")
+engine.predict_turn("dlg_001", "Alo ai đấy?", speaker="người gọi")
 # → {"probability": 0.12, "is_scam": False, ...}
 
-engine.predict_turn("dlg_001", "Tôi là công an, bạn đang bị điều tra!", speaker="scammer")
+engine.predict_turn("dlg_001", "Tôi là công an, bạn đang bị điều tra!", speaker="người nghe")
 # → {"probability": 0.87, "is_scam": True, ...}
 
 # Hoặc predict cả conversation
 messages = [
-    {"speaker_role": "normal", "text": "Alo ai đấy?"},
-    {"speaker_role": "scammer", "text": "Tôi là công an!"},
+    {"speaker_role": "người gọi", "text": "Alo ai đấy?"},
+    {"speaker_role": "người nghe", "text": "Tôi là công an!"},
 ]
 results = engine.predict_conversation(messages, "dlg_002")
 
@@ -226,8 +226,8 @@ Model hiện tại train bằng dialogue-level label qua Noisy-OR MIL; `turn_lab
 
 ## Metrics
 
-### Turn-level (chuẩn)
-- Accuracy, Precision, Recall, F1, AUROC
+### Dialogue-level (Noisy-OR aggregation)
+- Accuracy, F1, AUROC (dựa trên `p_dialogue = 1 − ∏(1−p_t)`)
 
 ### Streaming-specific
 | Metric | Ý nghĩa |
@@ -245,12 +245,12 @@ Model hiện tại train bằng dialogue-level label qua Noisy-OR MIL; `turn_lab
 | GRU hidden | 256 | 1 layer, unidirectional |
 | Speaker embed | 16-dim | 3 speakers |
 | Dropout (head) | 0.2 | |
-| Encoder LR | 1e-5 | Cho PhoBERT layers |
+| Encoder LR | 2e-5 | Cho PhoBERT layers |
 | RNN/Head LR | 1e-4 | Cho GRU + classifier |
 | Weight decay | 0.01 | AdamW |
 | Grad clip | 1.0 | |
 | Warmup ratio | 0.1 | Cosine schedule |
-| Batch size | 4 | Số dialogues/batch |
+| Batch size | 2 | Số dialogues/batch |
 
 ## Lưu ý quan trọng
 

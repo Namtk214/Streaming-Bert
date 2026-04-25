@@ -4,6 +4,10 @@ import os
 STREAMING_ROOT = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(STREAMING_ROOT)
 
+# Shared JVM singleton guard — abs_path → py_vncorenlp.VnCoreNLP instance.
+# JVM can only be started once per process; all modules must share this dict.
+VNCORENLP_CACHE: dict = {}
+
 # Speaker roles in raw data (handle common typos via normalize_role())
 # 0 = caller ("người gọi"), 1 = listener ("người nghe"), 2 = unknown
 ROLE_MAP = {"người gọi": 0, "người nghe": 1}

@@ -32,12 +32,11 @@ _streaming_dir = os.path.dirname(os.path.abspath(__file__))
 if _streaming_dir not in sys.path:
     sys.path.insert(0, _streaming_dir)
 
-from config import StreamingConfig
+from config import StreamingConfig, VNCORENLP_CACHE
 from model import StreamingScamDetector
 
 ROLE_CALLER   = "người gọi"
 ROLE_LISTENER = "người nghe"
-_SEGMENTER_CACHE = {}
 
 try:
     torch.serialization.add_safe_globals([StreamingConfig])
@@ -65,15 +64,15 @@ class InferenceWordSegmenter:
     """Strict VnCoreNLP loader for inference. Never downloads files."""
 
     def __init__(self, vncorenlp_dir: str):
-        vncorenlp_dir = os.path.abspath(vncorenlp_dir)
-        if vncorenlp_dir in _SEGMENTER_CACHE:
-            self.segmenter = _SEGMENTER_CACHE[vncorenlp_dir]
+        abs_dir = os.path.abspath(vncorenlp_dir)
+        if abs_dir in VNCORENLP_CACHE:
+            self.segmenter = VNCORENLP_CACHE[abs_dir]
             print("  VnCoreNLP reused OK")
             return
 
-        missing = _missing_vncorenlp_files(vncorenlp_dir)
+        missing = _missing_vncorenlp_files(abs_dir)
         if missing:
-            missing_rel = [os.path.relpath(p, vncorenlp_dir) for p in missing]
+            missing_rel = [os.path.relpath(p, abs_dir) for p in missing]
             raise FileNotFoundError(
                 "VnCoreNLP directory is missing required files: "
                 f"{missing_rel}. This inference loader never downloads files; "
@@ -83,9 +82,9 @@ class InferenceWordSegmenter:
         import py_vncorenlp
 
         self.segmenter = py_vncorenlp.VnCoreNLP(
-            annotators=["wseg"], save_dir=vncorenlp_dir
+            annotators=["wseg"], save_dir=abs_dir
         )
-        _SEGMENTER_CACHE[vncorenlp_dir] = self.segmenter
+        VNCORENLP_CACHE[abs_dir] = self.segmenter
         print("  VnCoreNLP loaded OK")
 
     def segment(self, text: str) -> str:
