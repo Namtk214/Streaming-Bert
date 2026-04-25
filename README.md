@@ -70,8 +70,6 @@ Có thể truyền path khác nếu cần:
 ```bash
 python prepare_data.py \
   --raw-dir ../data \
-  --out-dir data \
-  --vncorenlp-dir ../vncorenlp
 ```
 
 Output:
@@ -144,14 +142,6 @@ from visualize import launch_app
 launch_app(
     model_path="outputs/best_model",
     vncorenlp_dir="vncorenlp",
-    share=True,
-)
-
-# Neu da co WordSegmenter trong cung notebook/process, truyen thang vao
-# de khong khoi tao VnCoreNLP lan nua:
-launch_app(
-    model_path="outputs/best_model",
-    segmenter=segmenter,
     share=True,
 )
 
