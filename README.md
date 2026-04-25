@@ -26,20 +26,22 @@ turn text u_t
 Streaming-Bert/
 ├── README.md
 ├── config.py                  # Cấu hình hyperparameters
-├── generate_data.py           # Tạo dữ liệu synthetic để test
 ├── prepare_data.py            # Chuyển raw train/val/test JSON → streaming dataset
+├── convert_excel.py           # Chuyển Excel test data → streaming JSON
 ├── dataset.py                 # Dataset + collate_fn (padding 2 cấp)
 ├── model.py                   # PhoBERT + GRU + binary head
 ├── metrics.py                 # Streaming metrics (F1, AUROC, delay...)
 ├── train.py                   # Training loop (Noisy-OR MIL)
+├── test.py                    # Đánh giá model trên dữ liệu Excel đã convert
 ├── infer_stream.py            # Stateful online inference
 ├── visualize.py               # Gradio demo UI
 ├── data/
 │   ├── train.json              # Training set (streaming format)
 │   ├── val.json                # Validation set
-│   └── test.json               # Test set
+│   ├── test.json               # Test set
+│   └── excel_test.json         # Output của convert_excel.py
 └── outputs/
-    └── best_model/                   # Model đã train
+    └── best_model/             # Model đã train
         ├── model.pt
         ├── config.json
         └── tokenizer files...
