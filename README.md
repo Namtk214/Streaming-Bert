@@ -90,6 +90,9 @@ Baseline2/
 │   ├── infer_stream.py            # Streaming inference engine
 │   ├── visualize.py               # Gradio demo app
 │   │
+│   ├── convert_excel.py           # Convert Excel test data → JSON
+│   ├── test.py                    # Test model trên data từ Excel
+│   │
 │   ├── data/                      # Processed data (sau prepare_data.py)
 │   └── outputs/                   # Trained models & logs
 │
@@ -144,7 +147,8 @@ Sau khi chạy `prepare_data.py`:
 ```bash
 apt-get install -y default-jdk
 pip install torch transformers py_vncorenlp scikit-learn numpy
-pip install gradio  # optional, cho visualization
+pip install openpyxl  # cho convert_excel.py
+pip install gradio    # optional, cho visualization
 ```
 
 ### 2. Tiền xử lý data
@@ -215,6 +219,34 @@ Hoặc trong Colab:
 from visualize import launch_app
 launch_app(model_path="outputs/best_model", share=True)
 ```
+
+### 6. Convert Excel Test Data
+
+Chuyển file Excel (scam ở Sheet1, harmless ở sheet no_scam) sang JSON:
+
+```bash
+python convert_excel.py \
+    --excel "../Tổng hợp kịch bản test AI on devices_result_v2.xlsx" \
+    --out data/excel_test.json
+```
+
+Mỗi row trong Excel: `(index, conversation)` với turns cách nhau bằng `\n`.
+Script sẽ clean text, word segment (VnCoreNLP), và ghi ra JSON cùng format với processed data.
+
+### 7. Test trên Excel Data
+
+```bash
+# Test cơ bản
+python test.py --data data/excel_test.json
+
+# Test với threshold khác
+python test.py --data data/excel_test.json --threshold 0.4
+
+# In chi tiết per-turn evidence từng dialogue
+python test.py --data data/excel_test.json --verbose
+```
+
+Output: dialogue-level metrics (F1, AUROC, ...) + streaming metrics (detection delay, false alarm rate) + error summary (FN/FP).
 
 ---
 
