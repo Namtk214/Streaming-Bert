@@ -36,7 +36,7 @@ class StreamingConfig:
     head_dropout: float = 0.1
 
     # Optimizer
-    encoder_lr: float = 2e-5
+    # encoder_lr: float = 2e-5
     rnn_head_lr: float = 1e-4
     weight_decay: float = 0.01
     adam_epsilon: float = 1e-8
