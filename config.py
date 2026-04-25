@@ -33,7 +33,7 @@ class EarlyExitConfig:
 
     # PhoBERT turn encoder
     model_name: str = "vinai/phobert-base-v2"
-    max_tokens_per_turn: int = 128
+    max_tokens_per_turn: int = 256
     freeze_encoder: bool = True
 
     # Cross-turn attention
@@ -41,7 +41,7 @@ class EarlyExitConfig:
     attn_dropout: float = 0.1
 
     # Regularization
-    head_dropout: float = 0.2
+    head_dropout: float = 0.1
 
     # Noisy-OR numerical stability
     eps: float = 1e-6
@@ -55,7 +55,7 @@ class EarlyExitConfig:
 
     # Training
     num_epochs: int = 15
-    batch_size: int = 2
+    batch_size: int = 4
     patience: int = 5
 
     # Data split (used by prepare_data.py if needed)
