@@ -154,8 +154,6 @@ cd Streaming-Bert
 
 python prepare_data.py \
     --raw-data-dir ../data \
-    --output-dir data \
-    --vncorenlp-dir ../vncorenlp
 ```
 
 Script sẽ:
