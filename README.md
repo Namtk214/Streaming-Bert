@@ -145,14 +145,6 @@ launch_app(
     share=True,
 )
 
-# Neu da co WordSegmenter trong cung notebook/process, truyen thang vao
-# de khong khoi tao VnCoreNLP lan nua:
-launch_app(
-    model_path="outputs/best_model",
-    segmenter=segmenter,
-    share=True,
-)
-
 # Local
 python visualize.py
 ```
