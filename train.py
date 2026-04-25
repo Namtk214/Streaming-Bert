@@ -91,7 +91,9 @@ def preview_sample(model, dataloader, device, threshold=0.5, max_samples=2):
             break
     selected = selected[:max_samples]
 
-    print("\n  -- Validation Preview --")
+    import math as _math
+
+    print("\n  -- Random Validation Preview --")
     for n, idx in enumerate(selected, 1):
         item  = dataset[idx]
         batch = streaming_collate_fn([item])
@@ -101,20 +103,32 @@ def preview_sample(model, dataloader, device, threshold=0.5, max_samples=2):
             attention_mask=batch["attention_mask"],
             turn_mask=batch["turn_mask"],
         )
-        vlen      = int(batch["turn_mask"][0].sum())
-        d_prob    = float(output["dialogue_probs"][0].item())
-        t_probs   = output["turn_probs"][0, :vlen].cpu().numpy()
-        true_lbl  = int(batch["dialogue_labels"][0].item())
-        pred_lbl  = int(d_prob >= threshold)
-        match     = "[OK]" if pred_lbl == true_lbl else "[X] "
+        vlen    = int(batch["turn_mask"][0].sum())
+        d_prob  = float(output["dialogue_probs"][0].item())
+        t_probs = output["turn_probs"][0, :vlen].cpu().tolist()
 
-        dlg = dataset.dialogues[idx]
+        dlg      = dataset.dialogues[idx]
+        true_lbl = dlg.get("conversation_label", "?")
+        turns    = dlg.get("turns", [])[:vlen]
+
         print(
-            f"    Sample {n}: id={dlg.get('dialogue_id')} "
-            f"label={dlg.get('conversation_label')} "
-            f"p_dialogue={d_prob:.3f} {match}"
+            f"    Sample {n}: idx={idx} id={dlg.get('dialogue_id')} "
+            f"true={true_lbl} p_dialogue={d_prob:.4f} ({vlen} turns)"
         )
-        print(f"      Turn probs: {[round(float(p), 3) for p in t_probs]}")
+
+        log_comp = 0.0
+        for t, (q, turn) in enumerate(zip(t_probs, turns), 1):
+            log_comp += _math.log(max(1.0 - q, 1e-7))
+            p_agg     = 1.0 - _math.exp(log_comp)
+            alert     = " [!]" if p_agg >= threshold else ""
+            speaker   = turn.get("speaker", "")
+            # map speaker id → label
+            spk_label = {0: "người gọi", 1: "người nghe"}.get(speaker, str(speaker))
+            text_prev = turn.get("text", "")[:50]
+            print(
+                f"      T{t:<2}: q={q:.4f}  p_agg={p_agg:.4f}{alert}"
+                f" ({spk_label}: {text_prev}...)"
+            )
 
 
 # ── Training helpers ────────────────────────────────────────────
