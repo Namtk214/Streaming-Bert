@@ -68,11 +68,20 @@ class WordSegmenter:
     Wrapper cho VnCoreNLP word segmentation.
 
     PhoBERT yêu cầu input phải được word-segment bằng VnCoreNLP.
-    Nếu không load được VnCoreNLP → raise error.
+    Uses VNCORENLP_CACHE singleton to avoid JVM double-start in Colab.
     """
 
     def __init__(self, vncorenlp_dir: str):
         import py_vncorenlp
+        from config import VNCORENLP_CACHE
+
+        abs_dir = os.path.abspath(vncorenlp_dir)
+
+        # Reuse cached instance if JVM already started for this dir
+        if abs_dir in VNCORENLP_CACHE:
+            self.segmenter = VNCORENLP_CACHE[abs_dir]
+            print(f"  VnCoreNLP reused from cache ({abs_dir})")
+            return
 
         if not os.path.exists(os.path.join(vncorenlp_dir, "VnCoreNLP-1.2.jar")):
             print(f"  Đang tải VnCoreNLP models vào {vncorenlp_dir}...")
@@ -83,7 +92,9 @@ class WordSegmenter:
             annotators=["wseg"],
             save_dir=vncorenlp_dir,
         )
-        print("  VnCoreNLP loaded OK")
+        # Store in singleton cache
+        VNCORENLP_CACHE[abs_dir] = self.segmenter
+        print(f"  VnCoreNLP loaded OK (cached as {abs_dir})")
 
     def segment(self, text: str) -> str:
         result = self.segmenter.word_segment(text)

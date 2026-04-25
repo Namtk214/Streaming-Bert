@@ -20,6 +20,12 @@ PROJECT_ROOT = os.path.dirname(BASELINE2_ROOT)
 LABEL_MAP = {"harmless": 0, "scam": 1}
 LABEL_NAMES = {v: k for k, v in LABEL_MAP.items()}
 
+# VnCoreNLP singleton cache — prevents JVM double-start in Colab/notebooks.
+# Key = absolute path to vncorenlp_dir, Value = py_vncorenlp.VnCoreNLP instance.
+# Both WordSegmenter (prepare_data.py) and InferenceEngine (infer_stream.py)
+# import this dict and reuse the same instance.
+VNCORENLP_CACHE: dict = {}
+
 
 @dataclass
 class EarlyExitConfig:
@@ -41,7 +47,7 @@ class EarlyExitConfig:
     eps: float = 1e-6
 
     # Optimizer
-    head_lr: float = 1e-3
+    head_lr: float = 2e-5
     weight_decay: float = 0.01
     adam_epsilon: float = 1e-8
     grad_clip: float = 1.0
@@ -49,7 +55,7 @@ class EarlyExitConfig:
 
     # Training
     num_epochs: int = 15
-    batch_size: int = 4
+    batch_size: int = 2
     patience: int = 5
 
     # Data split (used by prepare_data.py if needed)

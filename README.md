@@ -249,8 +249,8 @@ launch_app(model_path="outputs/best_model", share=True)
 | `max_tokens_per_turn` | 128 | Max tokens mỗi turn |
 | `freeze_encoder` | True | Freeze PhoBERT |
 | `attn_num_heads` | 8 | Cross-turn attention heads |
-| `head_lr` | 1e-3 | Learning rate |
-| `batch_size` | 4 | Dialogues per batch |
+| `head_lr` | 2e-5 | Learning rate |
+| `batch_size` | 2 | Dialogues per batch |
 | `num_epochs` | 15 | Max epochs |
 | `patience` | 5 | Early stopping patience |
 | `eps` | 1e-6 | Noisy-OR numerical stability |
