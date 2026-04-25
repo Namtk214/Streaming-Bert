@@ -131,6 +131,9 @@ def build_result_html(results, messages):
         # Progress bar
         bar_width = int(prob * 100)
 
+        turn_prob = r.get("turn_prob")
+        turn_prob_str = f" | q_t={turn_prob:.3f}" if turn_prob is not None else ""
+
         html_parts.append(f"""
         <div style="margin-bottom: 12px; padding: 12px 16px; border-radius: 10px;
                     border-left: 4px solid {color};
@@ -140,7 +143,7 @@ def build_result_html(results, messages):
                     {speaker_icon} Turn {r['turn_index']} ({speaker})
                 </span>
                 <span style="font-weight: 700; color: {color}; font-size: 14px;">
-                    {label} ({prob:.1%})
+                    {label} (p≤t={prob:.1%}{turn_prob_str})
                 </span>
             </div>
             <div style="color: #374151; font-size: 14px; margin-bottom: 8px;">
@@ -193,7 +196,7 @@ def build_prob_chart(results):
     chart_html = """
     <div style="font-family: 'Segoe UI', sans-serif; max-width: 700px; margin: 16px auto 0;">
         <div style="font-weight: 600; color: #374151; margin-bottom: 10px; font-size: 15px;">
-            Scam Probability Timeline
+            Noisy-OR Prefix Score Timeline (p≤t)
         </div>
         <div style="display: flex; align-items: flex-end; gap: 8px; height: 160px;
                     padding: 10px; background: #f9fafb; border-radius: 10px; border: 1px solid #e5e7eb;">
