@@ -1,11 +1,13 @@
 """
-Configuration cho Baseline2: Early-Exit with Weighted Loss.
+Configuration cho Baseline2: Early-Exit with Noisy-OR Loss.
 
 Kiến trúc:
   turn text → PhoBERT (frozen) → mean pooling → h_t
   → Cross-Turn Attention (cho t >= 2) → c_t
-  → concat(h_t, c_t) → Linear classifier → logits
-  → Weighted Cumulative CE Loss: L = Σ (2t/N) * CE(p_t, y)
+  → concat(h_t, c_t) → Linear(2d → 1) → scalar logit s_t
+  → q_t = sigmoid(s_t)  (per-turn evidence probability)
+  → Noisy-OR aggregation: p_dialogue = 1 - ∏(1 - q_t)
+  → BCE(p_dialogue, y_dialogue)
 """
 
 from dataclasses import dataclass, field
@@ -14,14 +16,14 @@ import os
 BASELINE2_ROOT = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(BASELINE2_ROOT)
 
-# Label map: dialogue-level classification
-LABEL_MAP = {"LEGIT": 0, "SCAM": 1, "AMBIGUOUS": 2}
+# Label map: dialogue-level binary classification
+LABEL_MAP = {"harmless": 0, "scam": 1}
 LABEL_NAMES = {v: k for k, v in LABEL_MAP.items()}
 
 
 @dataclass
 class EarlyExitConfig:
-    """Hyperparameters cho Early-Exit with Weighted Loss baseline."""
+    """Hyperparameters cho Early-Exit with Noisy-OR Loss baseline."""
 
     # PhoBERT turn encoder
     model_name: str = "vinai/phobert-base-v2"
@@ -32,11 +34,11 @@ class EarlyExitConfig:
     attn_num_heads: int = 8
     attn_dropout: float = 0.1
 
-    # Classification
-    num_classes: int = 3  # LEGIT, SCAM, AMBIGUOUS
-
     # Regularization
     head_dropout: float = 0.2
+
+    # Noisy-OR numerical stability
+    eps: float = 1e-6
 
     # Optimizer
     head_lr: float = 1e-3
@@ -50,16 +52,14 @@ class EarlyExitConfig:
     batch_size: int = 4
     patience: int = 5
 
-    # Data split
+    # Data split (used by prepare_data.py if needed)
     seed: int = 42
     val_ratio: float = 0.15
     test_ratio: float = 0.15
 
     # Paths
-    raw_data_path: str = field(
-        default_factory=lambda: os.path.join(
-            PROJECT_ROOT, "data", "excel_raw_conversations.json"
-        )
+    raw_data_dir: str = field(
+        default_factory=lambda: os.path.join(PROJECT_ROOT, "data")
     )
     data_dir: str = field(
         default_factory=lambda: os.path.join(BASELINE2_ROOT, "data")

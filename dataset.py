@@ -1,7 +1,7 @@
 """
-Dataset và Collate Function cho Baseline2: Early-Exit with Weighted Loss.
+Dataset và Collate Function cho Baseline2: Early-Exit with Noisy-OR Loss.
 
-Mỗi sample là 1 dialogue (danh sách turns) với turn-level labels.
+Mỗi sample là 1 dialogue (danh sách turns) với dialogue-level label.
 Collate function thực hiện padding 2 cấp:
   1) Token-level: pad từng turn tới max_token_len (do tokenizer)
   2) Turn-level: pad số turns tới max_num_turns trong batch
@@ -21,7 +21,7 @@ class EarlyExitDataset(Dataset):
     Mỗi sample gồm:
     - input_ids [T, L]: token IDs cho từng turn
     - attention_mask [T, L]: attention mask cho từng turn
-    - turn_labels [T]: label per turn (LEGIT=0, SCAM=1, AMBIGUOUS=2)
+    - dialogue_label: scalar (0=harmless, 1=scam)
     - num_turns: số turn thật
     """
 
@@ -40,10 +40,9 @@ class EarlyExitDataset(Dataset):
 
         input_ids_list = []
         attention_mask_list = []
-        turn_labels_list = []
 
         for turn in turns:
-            # Tokenize từng turn riêng
+            # Tokenize từng turn riêng (đã word-segmented bởi prepare_data.py)
             encoding = self.tokenizer(
                 turn["text_segmented"],
                 max_length=self.max_token_len,
@@ -53,12 +52,14 @@ class EarlyExitDataset(Dataset):
             )
             input_ids_list.append(encoding["input_ids"].squeeze(0))
             attention_mask_list.append(encoding["attention_mask"].squeeze(0))
-            turn_labels_list.append(turn["label"])
+
+        # Dialogue-level label (binary)
+        dialogue_label = dlg["dialogue_label"]
 
         return {
             "input_ids": torch.stack(input_ids_list),            # [T, L]
             "attention_mask": torch.stack(attention_mask_list),   # [T, L]
-            "turn_labels": torch.tensor(turn_labels_list, dtype=torch.long),  # [T]
+            "dialogue_label": torch.tensor(dialogue_label, dtype=torch.float),  # scalar
             "num_turns": len(turns),
         }
 
@@ -75,7 +76,7 @@ def early_exit_collate_fn(batch: List[Dict]) -> Dict[str, torch.Tensor]:
     - input_ids:      [B, T_max, L]
     - attention_mask:  [B, T_max, L]
     - turn_mask:       [B, T_max]
-    - labels:          [B, T_max]   — per-turn label, padding = -100
+    - labels:          [B]         — dialogue-level label (binary)
     """
     max_turns = max(item["num_turns"] for item in batch)
     token_len = batch[0]["input_ids"].shape[-1]
@@ -85,15 +86,16 @@ def early_exit_collate_fn(batch: List[Dict]) -> Dict[str, torch.Tensor]:
     input_ids = torch.zeros(B, max_turns, token_len, dtype=torch.long)
     attention_mask = torch.zeros(B, max_turns, token_len, dtype=torch.long)
     turn_mask = torch.zeros(B, max_turns, dtype=torch.float)
-    # -100 = ignore index cho CE loss (padded turns không tính loss)
-    labels = torch.full((B, max_turns), -100, dtype=torch.long)
+
+    # Dialogue-level labels [B]
+    labels = torch.zeros(B, dtype=torch.float)
 
     for i, item in enumerate(batch):
         T = item["num_turns"]
         input_ids[i, :T] = item["input_ids"]
         attention_mask[i, :T] = item["attention_mask"]
         turn_mask[i, :T] = 1.0   # turn thật = 1, padding = 0
-        labels[i, :T] = item["turn_labels"]
+        labels[i] = item["dialogue_label"]
 
     return {
         "input_ids": input_ids,

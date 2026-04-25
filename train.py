@@ -1,9 +1,9 @@
 """
-Training loop cho Baseline2: Early-Exit with Weighted Loss.
+Training loop cho Baseline2: Early-Exit with Noisy-OR Loss.
 
 Chiến lược training:
   - Freeze PhoBERT hoàn toàn
-  - Train CrossTurnAttention + Linear classifier
+  - Train CrossTurnAttention + Evidence Head (Linear 2d → 1)
   - AdamW + linear warmup + cosine decay
   - Gradient clipping
   - Validation mỗi epoch + early stopping
@@ -32,7 +32,7 @@ if _baseline2_dir not in sys.path:
 from config import EarlyExitConfig, LABEL_NAMES
 from dataset import EarlyExitDataset, early_exit_collate_fn
 from models.early_exit_model import EarlyExitWeightedModel
-from metrics import compute_early_exit_metrics, print_early_exit_report
+from metrics import compute_noisy_or_metrics, print_noisy_or_report
 
 
 def set_seed(seed: int):
@@ -47,14 +47,16 @@ def set_seed(seed: int):
 # Evaluation
 # ============================================================
 @torch.no_grad()
-def evaluate(model, dataloader, device):
+def evaluate(model, dataloader, device, threshold=0.5):
     """Evaluate model trên dataloader, trả về metrics dict."""
     model.eval()
     total_loss = 0.0
     num_dialogues = 0
 
-    all_turn_preds = []   # list of list[int] per dialogue
-    all_turn_labels = []  # list of list[int] per dialogue
+    all_p_dialogue = []   # list of float
+    all_labels = []       # list of int
+    all_turn_q = []       # list of list[float]
+    all_turn_p_agg = []   # list of list[float]
 
     for batch in dataloader:
         batch = {k: v.to(device) for k, v in batch.items()}
@@ -71,19 +73,25 @@ def evaluate(model, dataloader, device):
         total_loss += loss.item() * B
         num_dialogues += B
 
-        # Thu thập per-turn predictions and labels
+        # Thu thập dialogue-level predictions và per-turn data
         for b in range(B):
-            N = int(batch["turn_mask"][b].sum().item())
-            preds = [
-                int(lg.argmax().item()) for lg in output["all_turn_logits"][b]
-            ]
-            labels = batch["labels"][b, :N].cpu().tolist()
-            all_turn_preds.append(preds)
-            all_turn_labels.append(labels)
+            p_dlg = output["p_dialogue"][b].item()
+            label = int(batch["labels"][b].item())
+            all_p_dialogue.append(p_dlg)
+            all_labels.append(label)
+
+            # Per-turn data
+            q_list = [q.item() for q in output["all_turn_q"][b]]
+            p_agg_list = [p.item() for p in output["all_turn_p_agg"][b]]
+            all_turn_q.append(q_list)
+            all_turn_p_agg.append(p_agg_list)
 
     avg_loss = total_loss / max(num_dialogues, 1)
-    metrics = compute_early_exit_metrics(
-        all_turn_preds, all_turn_labels, LABEL_NAMES,
+    metrics = compute_noisy_or_metrics(
+        all_p_dialogue, all_labels,
+        all_turn_q=all_turn_q,
+        all_turn_p_agg=all_turn_p_agg,
+        threshold=threshold,
     )
     metrics["loss"] = avg_loss
 
@@ -104,11 +112,11 @@ def preview_sample(model, dataloader, device, max_samples=2):
     num_candidates = min(len(dataset), max(max_samples * 8, 8))
     candidate_indices = random.sample(range(len(dataset)), num_candidates)
 
-    # Cố gắng chọn các labels khác nhau
+    # Cố gắng chọn cả scam và harmless
     selected_indices = []
     selected_labels = set()
     for idx in candidate_indices:
-        dlg_label = dataset.dialogues[idx].get("conversation_label", "UNKNOWN")
+        dlg_label = dataset.dialogues[idx].get("dialogue_label", -1)
         if dlg_label not in selected_labels or len(selected_indices) < max_samples:
             selected_indices.append(idx)
             selected_labels.add(dlg_label)
@@ -129,25 +137,31 @@ def preview_sample(model, dataloader, device, max_samples=2):
         )
 
         dialogue = dataset.dialogues[dataset_idx]
-        true_dlg_label = dialogue["conversation_label"]
-        onset = dialogue.get("scam_onset")
+        true_label_id = dialogue["dialogue_label"]
+        true_label_name = dialogue.get("dialogue_label_name",
+                                        LABEL_NAMES.get(true_label_id, "?"))
         N = item["num_turns"]
+        p_dlg = output["p_dialogue"][0].item()
 
         print(f"    Sample {preview_idx}: idx={dataset_idx} "
               f"id={dialogue.get('dialogue_id')} "
-              f"dlg_label={true_dlg_label} onset={onset} ({N} turns)")
+              f"true={true_label_name} p_dialogue={p_dlg:.4f} ({N} turns)")
 
-        # Show per-turn: true label vs predicted
-        for t, logits_t in enumerate(output["all_turn_logits"][0]):
-            pred_id = int(logits_t.argmax().item())
-            pred_name = LABEL_NAMES.get(pred_id, "?")
-            true_lbl = item["turn_labels"][t].item()
-            true_name = LABEL_NAMES.get(true_lbl, "?")
-            probs = torch.softmax(logits_t, dim=0).cpu().numpy()
-            prob_str = " ".join(f"{p:.2f}" for p in probs)
-            marker = "OK" if pred_id == true_lbl else "XX"
-            print(f"      T{t+1}: true={true_name:10s} pred={pred_name:10s} "
-                  f"[{prob_str}] {marker}")
+        # Show per-turn: q_t (evidence) and p_agg (cumulative)
+        for t in range(len(output["all_turn_q"][0])):
+            q_t = output["all_turn_q"][0][t].item()
+            p_agg = output["all_turn_p_agg"][0][t].item()
+
+            # Turn text preview
+            turn_text = ""
+            if t < len(dialogue["turns"]):
+                turn = dialogue["turns"][t]
+                role = turn.get("role", "?")
+                text = turn.get("text", turn.get("text_segmented", ""))[:50]
+                turn_text = f" ({role}: {text}...)"
+
+            alert = " [!]" if p_agg >= 0.5 else ""
+            print(f"      T{t+1}: q={q_t:.4f}  p_agg={p_agg:.4f}{alert}{turn_text}")
 
 
 # ============================================================
@@ -164,7 +178,7 @@ def train(cfg: EarlyExitConfig = None):
     set_seed(cfg.seed)
 
     print("=" * 60)
-    print("EARLY-EXIT WITH WEIGHTED LOSS – TRAINING")
+    print("EARLY-EXIT WITH NOISY-OR LOSS – TRAINING")
     print("=" * 60)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -203,13 +217,18 @@ def train(cfg: EarlyExitConfig = None):
     print(f"  Train: {len(train_dataset)} dialogues ({len(train_loader)} batches)")
     print(f"  Val:   {len(val_dataset)} dialogues ({len(val_loader)} batches)")
 
+    # Label distribution
+    train_labels = [d["dialogue_label"] for d in train_dataset.dialogues]
+    print(f"  Train labels: harmless={train_labels.count(0)} scam={train_labels.count(1)}")
+
     # ── 3. Model ──
     print(f"\n  Loading model: {cfg.model_name}")
     model = EarlyExitWeightedModel(cfg).to(device)
     print(f"  Trainable params: {model.count_trainable_params():,}")
     print(f"  Freeze encoder:   {cfg.freeze_encoder}")
-    print(f"  Num classes:      {cfg.num_classes}")
+    print(f"  Evidence head:    Linear(2×{model.hidden_dim} → 1)")
     print(f"  Attention heads:  {cfg.attn_num_heads}")
+    print(f"  Noisy-OR eps:     {cfg.eps}")
 
     # ── 4. Optimizer + Scheduler ──
     total_steps = len(train_loader) * cfg.num_epochs
@@ -278,20 +297,23 @@ def train(cfg: EarlyExitConfig = None):
 
         elapsed = time.time() - epoch_start
         print(f"\n  Epoch {epoch}/{cfg.num_epochs} ({elapsed:.1f}s)")
-        print(f"    Train loss:       {avg_train_loss:.4f}")
-        print(f"    Val loss:         {val_metrics['loss']:.4f}")
-        print(f"    Val final acc:    {val_metrics['final_accuracy']:.4f}")
-        print(f"    Val macro F1:     {val_metrics['final_macro_f1']:.4f}")
-        print(f"    Val weighted F1:  {val_metrics['final_weighted_f1']:.4f}")
-        if not np.isnan(val_metrics['avg_detection_delay']):
-            print(f"    Avg delay:        {val_metrics['avg_detection_delay']:.2f} turns")
-        print(f"    False alarm:      {val_metrics['false_alarm_rate']:.4f}")
+        print(f"    Train loss:    {avg_train_loss:.4f}")
+        print(f"    Val loss:      {val_metrics['loss']:.4f}")
+        print(f"    Val accuracy:  {val_metrics['accuracy']:.4f}")
+        print(f"    Val F1:        {val_metrics['f1']:.4f}")
+        print(f"    Val precision: {val_metrics['precision']:.4f}")
+        print(f"    Val recall:    {val_metrics['recall']:.4f}")
+        if not np.isnan(val_metrics.get('auroc', float('nan'))):
+            print(f"    Val AUROC:     {val_metrics['auroc']:.4f}")
+        if not np.isnan(val_metrics.get('avg_detection_delay', float('nan'))):
+            print(f"    Avg 1st alert: turn {val_metrics['avg_first_alert_turn']:.1f}")
+        print(f"    False alarm:   {val_metrics.get('false_alarm_rate', 0):.4f}")
 
         # Sample preview
         preview_sample(model, val_loader, device)
 
         # ── Best model & early stopping ──
-        current_f1 = val_metrics["final_macro_f1"]
+        current_f1 = val_metrics["f1"]
         if current_f1 > best_f1:
             best_f1 = current_f1
             best_epoch = epoch
@@ -315,7 +337,7 @@ def train(cfg: EarlyExitConfig = None):
                     f, indent=2,
                 )
 
-            print(f"    * Best model saved! (macro F1={best_f1:.4f})")
+            print(f"    * Best model saved! (F1={best_f1:.4f})")
         else:
             patience_counter += 1
             print(f"    No improvement ({patience_counter}/{cfg.patience})")
@@ -327,7 +349,7 @@ def train(cfg: EarlyExitConfig = None):
     # ── 6. Final evaluation ──
     print(f"\n{'='*60}")
     print(f"TRAINING COMPLETED")
-    print(f"  Best epoch: {best_epoch} | Best val macro F1: {best_f1:.4f}")
+    print(f"  Best epoch: {best_epoch} | Best val F1: {best_f1:.4f}")
     print(f"{'='*60}")
 
     # Load best model
@@ -348,7 +370,7 @@ def train(cfg: EarlyExitConfig = None):
         )
         print(f"\n  Evaluating on test set ({len(test_dataset)} dialogues)...")
         test_metrics = evaluate(model, test_loader, device)
-        print_early_exit_report(test_metrics, LABEL_NAMES)
+        print_noisy_or_report(test_metrics)
 
     return model
 
@@ -356,7 +378,7 @@ def train(cfg: EarlyExitConfig = None):
 # ============================================================
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Train Early-Exit with Weighted Loss baseline."
+        description="Train Early-Exit with Noisy-OR Loss baseline."
     )
     parser.add_argument(
         "--output-dir", default=None,

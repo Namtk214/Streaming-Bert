@@ -1,4 +1,4 @@
-"""Models cho Baseline2: Early-Exit with Weighted Loss."""
+"""Models cho Baseline2: Early-Exit with Noisy-OR Loss."""
 
 from .turn_encoder import TurnEncoder
 from .cross_turn_attention import CrossTurnAttention

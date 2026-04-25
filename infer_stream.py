@@ -1,19 +1,21 @@
 """
-Stateful Streaming Inference cho Baseline2: Early-Exit with Weighted Loss.
+Stateful Streaming Inference cho Baseline2: Early-Exit with Noisy-OR Loss.
 
 Mô phỏng inference online thực tế:
-  - Nhận turn mới → encode PhoBERT → cross-attn với history → classify
-  - Cache history embeddings [h_1...h_{t-1}] theo dialogue_id
-  - Không update gradient
+  - Nhận turn mới → encode PhoBERT → cross-attn với history → evidence head
+  - q_t = sigmoid(s_t) — evidence probability tại turn t
+  - p_agg = 1 - (1 - p_prev) * (1 - q_t) — online Noisy-OR update
+  - Cache history embeddings [h_1...h_{t-1}] và p_agg theo dialogue_id
 
-Streaming state chỉ cần lưu:
+Streaming state cần lưu:
     H_prev = [h_1, ..., h_{t-1}]
+    p_agg_prev = xác suất tích lũy đến turn trước
 
 Usage:
     engine = EarlyExitInferenceEngine(model_path="Baseline2/outputs/best_model")
 
     result = engine.predict_turn("dlg_001", "Tôi là công an!")
-    print(result["prediction"], result["probabilities"])
+    print(result["q_t"], result["p_agg"], result["is_scam"])
 
     engine.reset("dlg_001")
 """
@@ -21,7 +23,6 @@ Usage:
 import os
 import sys
 import json
-import math
 
 import torch
 from transformers import AutoTokenizer
@@ -36,9 +37,9 @@ from config import EarlyExitConfig, LABEL_MAP, LABEL_NAMES
 
 class EarlyExitInferenceEngine:
     """
-    Stateful streaming inference engine cho Early-Exit model.
+    Stateful streaming inference engine cho Early-Exit model (Noisy-OR).
 
-    Giữ history embeddings [h_1...h_{t-1}] theo dialogue_id.
+    Giữ history embeddings [h_1...h_{t-1}] và p_agg theo dialogue_id.
     Mỗi turn mới chỉ cần 1 PhoBERT forward + 1 cross-attn step.
     """
 
@@ -89,12 +90,13 @@ class EarlyExitInferenceEngine:
         from prepare_data import WordSegmenter
         self.segmenter = WordSegmenter(vncorenlp_dir)
 
-        # History cache per dialogue: {dialogue_id: [h_1, h_2, ...]}
+        # History cache per dialogue:
+        # {dialogue_id: {"h_list": [h_1, h_2, ...], "p_agg": float}}
         self._history_cache = {}
 
         print(f"  EarlyExitInferenceEngine loaded on {self.device}")
         print(f"  Threshold: {self.threshold}")
-        print(f"  Num classes: {self.config.num_classes}")
+        print(f"  Loss: Noisy-OR + BCE")
 
     def _preprocess(self, text: str) -> str:
         """Clean + word segment text (bắt buộc cho PhoBERT)."""
@@ -114,7 +116,7 @@ class EarlyExitInferenceEngine:
         self,
         dialogue_id: str,
         text: str,
-        speaker: str = "normal",
+        speaker: str = "unknown",
     ) -> dict:
         """
         Dự đoán 1 turn mới.
@@ -126,15 +128,14 @@ class EarlyExitInferenceEngine:
         text : str
             Nội dung turn (raw text, chưa segment).
         speaker : str
-            "normal", "scammer", hoặc "unknown".
+            Role/speaker info.
 
         Returns
         -------
         dict:
-            - prediction: str (LEGIT/SCAM/AMBIGUOUS)
-            - prediction_id: int
-            - probabilities: dict {label_name: probability}
-            - is_scam: bool
+            - q_t: float — evidence probability tại turn này
+            - p_agg: float — cumulative scam probability (Noisy-OR)
+            - is_scam: bool — p_agg >= threshold
             - turn_index: int
             - dialogue_id: str
         """
@@ -154,43 +155,36 @@ class EarlyExitInferenceEngine:
 
         # Get cached history
         if dialogue_id in self._history_cache:
-            h_prev_list = self._history_cache[dialogue_id]
+            cache = self._history_cache[dialogue_id]
+            h_prev_list = cache["h_list"]
+            p_agg_prev = cache["p_agg"]
             turn_idx = len(h_prev_list) + 1
         else:
             h_prev_list = []
+            p_agg_prev = 0.0
             turn_idx = 1
 
-        # Forward (no grad)
-        logits, probs, h_t = self.model.encode_single_turn(
-            input_ids, attention_mask, h_prev_list if h_prev_list else None
+        # Forward (no grad) — encode_single_turn returns q_t, p_agg, h_t
+        q_t, p_agg, h_t = self.model.encode_single_turn(
+            input_ids, attention_mask,
+            h_prev_list if h_prev_list else None,
+            p_agg_prev=p_agg_prev,
         )
 
-        # Prediction
-        pred_id = int(logits.argmax().item())
-        pred_name = LABEL_NAMES.get(pred_id, "UNKNOWN")
-
-        # Probabilities dict
-        probs_np = probs.cpu().numpy()
-        prob_dict = {
-            LABEL_NAMES[i]: round(float(probs_np[i]), 4)
-            for i in range(len(probs_np))
-        }
-
         # Is scam?
-        scam_prob = prob_dict.get("SCAM", 0.0)
-        is_scam = scam_prob >= self.threshold
+        is_scam = p_agg >= self.threshold
 
         # Update history cache
         if dialogue_id not in self._history_cache:
-            self._history_cache[dialogue_id] = []
-        self._history_cache[dialogue_id].append(h_t.detach())
+            self._history_cache[dialogue_id] = {"h_list": [], "p_agg": 0.0}
+        self._history_cache[dialogue_id]["h_list"].append(h_t.detach())
+        self._history_cache[dialogue_id]["p_agg"] = p_agg
 
         return {
             "dialogue_id": dialogue_id,
             "turn_index": turn_idx,
-            "prediction": pred_name,
-            "prediction_id": pred_id,
-            "probabilities": prob_dict,
+            "q_t": round(q_t, 4),
+            "p_agg": round(p_agg, 4),
             "is_scam": bool(is_scam),
             "speaker": speaker,
             "text_preview": text[:80],
@@ -204,7 +198,7 @@ class EarlyExitInferenceEngine:
         Parameters
         ----------
         messages : list of dict
-            Mỗi dict có keys: "text", "speaker_role"
+            Mỗi dict có keys: "text", "speaker_role" (hoặc "role")
         dialogue_id : str
 
         Returns
@@ -215,10 +209,12 @@ class EarlyExitInferenceEngine:
         results = []
 
         for msg in messages:
+            text = msg.get("text", msg.get("content", ""))
+            speaker = msg.get("speaker_role", msg.get("role", "unknown"))
             result = self.predict_turn(
                 dialogue_id=dialogue_id,
-                text=msg["text"],
-                speaker=msg.get("speaker_role", "unknown"),
+                text=text,
+                speaker=speaker,
             )
             results.append(result)
 
@@ -244,7 +240,7 @@ class EarlyExitInferenceEngine:
 def demo():
     """Demo streaming inference cho Early-Exit model."""
     print("=" * 60)
-    print("EARLY-EXIT STREAMING INFERENCE DEMO")
+    print("EARLY-EXIT NOISY-OR STREAMING INFERENCE DEMO")
     print("=" * 60)
 
     cfg = EarlyExitConfig()
@@ -262,16 +258,17 @@ def demo():
     )
 
     messages = [
-        {"speaker_role": "normal", "text": "Alo ai đấy?"},
-        {"speaker_role": "scammer", "text": "Tôi là công an, bạn đang bị điều tra!"},
-        {"speaker_role": "normal", "text": "Cái gì ạ?"},
-        {"speaker_role": "scammer", "text": "Chuyển tiền ngay!"},
+        {"role": "người gọi", "text": "Alo ai đấy?"},
+        {"role": "người nghe", "text": "Tôi là công an, bạn đang bị điều tra!"},
+        {"role": "người gọi", "text": "Cái gì ạ?"},
+        {"role": "người nghe", "text": "Chuyển tiền ngay!"},
     ]
 
     results = engine.predict_conversation(messages, "dlg_001")
     for r in results:
-        print(f"  Turn {r['turn_index']}: {r['prediction']} "
-              f"scam_prob={r['probabilities'].get('SCAM', 0):.3f}")
+        alert = "[!] SCAM!" if r['is_scam'] else "[OK]"
+        print(f"  Turn {r['turn_index']}: q={r['q_t']:.3f} "
+              f"p_agg={r['p_agg']:.3f} {alert}")
         """)
         return
 
@@ -284,12 +281,12 @@ def demo():
 
     # Test scam conversation
     scam_messages = [
-        {"speaker_role": "normal", "text": "Alo ai đấy ạ?"},
-        {"speaker_role": "scammer",
+        {"role": "người gọi", "text": "Alo ai đấy ạ?"},
+        {"role": "người nghe",
          "text": "Tôi là Đại úy Nguyễn Văn Hùng, Công an thành phố. "
                  "Bạn đang bị điều tra vì liên quan đến đường dây rửa tiền."},
-        {"speaker_role": "normal", "text": "Cái gì ạ? Tôi không biết gì cả."},
-        {"speaker_role": "scammer",
+        {"role": "người gọi", "text": "Cái gì ạ? Tôi không biết gì cả."},
+        {"role": "người nghe",
          "text": "Chuyển tiền vào tài khoản an toàn ngay trong vòng 30 phút, "
                  "nếu không sẽ bị bắt."},
     ]
@@ -298,23 +295,23 @@ def demo():
     results = engine.predict_conversation(scam_messages, "test_scam")
     for r in results:
         alert = "[!] SCAM!" if r["is_scam"] else "[OK]"
-        print(f"  Turn {r['turn_index']}: {r['prediction']:10s} "
-              f"scam_p={r['probabilities'].get('SCAM', 0):.3f} {alert}")
+        print(f"  Turn {r['turn_index']}: q={r['q_t']:.3f} "
+              f"p_agg={r['p_agg']:.3f} {alert}")
 
     # Test legit conversation
     legit_messages = [
-        {"speaker_role": "normal", "text": "Alo bạn ơi, chiều nay đi cà phê không?"},
-        {"speaker_role": "normal", "text": "Oke, mấy giờ?"},
-        {"speaker_role": "normal", "text": "3 giờ nhé, quán trên Nguyễn Huệ."},
-        {"speaker_role": "normal", "text": "Được rồi, hẹn gặp!"},
+        {"role": "người gọi", "text": "Alo bạn ơi, chiều nay đi cà phê không?"},
+        {"role": "người nghe", "text": "Oke, mấy giờ?"},
+        {"role": "người gọi", "text": "3 giờ nhé, quán trên Nguyễn Huệ."},
+        {"role": "người nghe", "text": "Được rồi, hẹn gặp!"},
     ]
 
-    print("\n  -- Test LEGIT conversation --")
+    print("\n  -- Test HARMLESS conversation --")
     results = engine.predict_conversation(legit_messages, "test_legit")
     for r in results:
         alert = "[!] SCAM!" if r["is_scam"] else "[OK]"
-        print(f"  Turn {r['turn_index']}: {r['prediction']:10s} "
-              f"scam_p={r['probabilities'].get('SCAM', 0):.3f} {alert}")
+        print(f"  Turn {r['turn_index']}: q={r['q_t']:.3f} "
+              f"p_agg={r['p_agg']:.3f} {alert}")
 
 
 if __name__ == "__main__":

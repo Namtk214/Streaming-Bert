@@ -1,5 +1,5 @@
-"""Loss functions cho Baseline2."""
+"""Loss functions cho Baseline2: Noisy-OR Loss."""
 
-from .weighted_prefix_loss import weighted_cumulative_loss
+from .weighted_prefix_loss import noisy_or_loss
 
-__all__ = ["weighted_cumulative_loss"]
+__all__ = ["noisy_or_loss"]

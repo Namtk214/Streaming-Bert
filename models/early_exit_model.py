@@ -1,22 +1,25 @@
 """
-EarlyExitWeightedModel — Main model cho Baseline2.
+EarlyExitWeightedModel — Main model cho Baseline2 (Noisy-OR Loss).
 
 Kiến trúc:
   1. TurnEncoder: PhoBERT shared → mean pooling → h_t ∈ R^d
   2. CrossTurnAttention: query=h_t, kv=[h_1..h_{t-1}] → c_t ∈ R^d
   3. Fusion: z_t = concat(h_t, c_t) ∈ R^{2d}
      (turn 1: c_1 = zeros, nên z_1 = concat(h_1, zeros))
-  4. Classifier: Linear(2d → C) → logits_t
-  5. Weighted Loss: L = Σ (2t/N) * CE(logits_t, y)
+  4. Evidence head: Linear(2d → 1) → scalar logit s_t
+  5. q_t = sigmoid(s_t) — per-turn evidence probability
+  6. Noisy-OR: p_dialogue = 1 - ∏(1 - q_t)
+  7. Loss: BCE(p_dialogue, y_dialogue)
 
 Forward pass:
   - Flatten all turns trong batch → encode bằng PhoBERT
   - Regroup theo dialogue
-  - Loop từng dialogue: cross-attn per turn → classifier → weighted loss
+  - Loop từng dialogue: cross-attn per turn → evidence head → Noisy-OR → BCE
 """
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from .turn_encoder import TurnEncoder
 from .cross_turn_attention import CrossTurnAttention
@@ -28,14 +31,14 @@ _baseline2_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _baseline2_dir not in sys.path:
     sys.path.insert(0, _baseline2_dir)
 
-from losses.weighted_prefix_loss import weighted_cumulative_loss
+from losses.weighted_prefix_loss import noisy_or_loss
 
 
 class EarlyExitWeightedModel(nn.Module):
     """
-    Early-Exit with Weighted Loss model.
+    Early-Exit with Noisy-OR Loss model.
 
-    PhoBERT (frozen) + Cross-Turn Attention + Linear Classifier.
+    PhoBERT (frozen) + Cross-Turn Attention + Binary Evidence Head.
     """
 
     def __init__(self, config):
@@ -56,9 +59,9 @@ class EarlyExitWeightedModel(nn.Module):
             dropout=config.attn_dropout,
         )
 
-        # 3. Classifier: Linear(2d → C)
+        # 3. Evidence head: Linear(2d → 1) → scalar logit
         self.dropout = nn.Dropout(config.head_dropout)
-        self.classifier = nn.Linear(2 * self.hidden_dim, config.num_classes)
+        self.evidence_head = nn.Linear(2 * self.hidden_dim, 1)
 
     def forward(self, input_ids, attention_mask, turn_mask,
                 labels=None, num_turns_list=None):
@@ -73,8 +76,8 @@ class EarlyExitWeightedModel(nn.Module):
             Token-level attention mask.
         turn_mask : Tensor [B, T]
             1 = turn thật, 0 = turn padding.
-        labels : Tensor [B, T] (optional)
-            Turn-level labels. Padding turns = -100.
+        labels : Tensor [B] (optional)
+            Dialogue-level labels. 0 = harmless, 1 = scam.
         num_turns_list : list of int (optional)
             Số turn thật mỗi dialogue (tính từ turn_mask nếu None).
 
@@ -82,8 +85,9 @@ class EarlyExitWeightedModel(nn.Module):
         -------
         dict with:
             - 'loss': scalar (nếu labels != None)
-            - 'all_turn_logits': list of list — logits mỗi turn mỗi dialogue
-            - 'final_logits': Tensor [B, C] — logits turn cuối
+            - 'all_turn_q': list of list — q_t (evidence prob) mỗi turn mỗi dialogue
+            - 'all_turn_p_agg': list of list — p_t_agg (cumulative prob) mỗi dialogue
+            - 'p_dialogue': Tensor [B] — dialogue-level scam probability
         """
         B, T, L = input_ids.shape
 
@@ -103,16 +107,23 @@ class EarlyExitWeightedModel(nn.Module):
         if num_turns_list is None:
             num_turns_list = turn_mask.sum(dim=1).long().tolist()
 
-        # 3. Per-dialogue: cross-attn + classifier + loss
-        batch_all_logits = []
-        batch_final_logits = []
+        # 3. Per-dialogue: cross-attn + evidence head + Noisy-OR
+        batch_all_q = []        # per-turn evidence probs
+        batch_all_p_agg = []    # per-turn cumulative probs
+        batch_p_dialogue = []   # dialogue-level probs
         total_loss = torch.tensor(0.0, device=input_ids.device)
+
+        eps = self.config.eps
 
         for b in range(B):
             N = num_turns_list[b]
             H = all_embeddings[b, :N]  # [N, d]
 
-            turn_logits = []
+            turn_q = []      # evidence probabilities
+            turn_p_agg = []  # cumulative probabilities
+
+            p_agg = torch.tensor(0.0, device=input_ids.device)
+
             for t in range(N):
                 h_t = H[t]  # [d]
 
@@ -122,21 +133,28 @@ class EarlyExitWeightedModel(nn.Module):
                 else:
                     c_t = self.cross_attn(h_t, H[:t])  # [d]
 
-                # Fusion + classifier
+                # Fusion + evidence head
                 z_t = torch.cat([h_t, c_t], dim=0)  # [2d]
                 z_t = self.dropout(z_t)
-                logits_t = self.classifier(z_t)  # [C]
-                turn_logits.append(logits_t)
+                s_t = self.evidence_head(z_t).squeeze(-1)  # scalar logit
+                q_t = torch.sigmoid(s_t)  # scalar in (0, 1)
 
-            batch_all_logits.append(turn_logits)
-            batch_final_logits.append(turn_logits[-1])
+                turn_q.append(q_t)
 
-            # Weighted cumulative loss (per-turn labels)
+                # Online Noisy-OR update: p_t_agg = 1 - (1 - p_{t-1}) * (1 - q_t)
+                p_agg = 1.0 - (1.0 - p_agg) * (1.0 - q_t)
+                turn_p_agg.append(p_agg)
+
+            batch_all_q.append(turn_q)
+            batch_all_p_agg.append(turn_p_agg)
+
+            # Dialogue-level probability (= p_T_agg, last cumulative)
+            p_dlg = turn_p_agg[-1] if turn_p_agg else torch.tensor(0.0, device=input_ids.device)
+            batch_p_dialogue.append(p_dlg)
+
+            # Noisy-OR loss (per-dialogue)
             if labels is not None:
-                dlg_labels = labels[b, :N].tolist()  # [N]
-                dlg_loss = weighted_cumulative_loss(
-                    turn_logits, dlg_labels, N
-                )
+                dlg_loss, _ = noisy_or_loss(turn_q, labels[b], eps=eps)
                 total_loss = total_loss + dlg_loss
 
         # Average loss across batch
@@ -144,17 +162,18 @@ class EarlyExitWeightedModel(nn.Module):
         if labels is not None:
             loss = total_loss / B
 
-        final_logits = torch.stack(batch_final_logits, dim=0)  # [B, C]
+        p_dialogue = torch.stack(batch_p_dialogue)  # [B]
 
         return {
             "loss": loss,
-            "all_turn_logits": batch_all_logits,
-            "final_logits": final_logits,
+            "all_turn_q": batch_all_q,        # list of list[Tensor scalar]
+            "all_turn_p_agg": batch_all_p_agg, # list of list[Tensor scalar]
+            "p_dialogue": p_dialogue,           # [B]
         }
 
     @torch.no_grad()
     def encode_single_turn(self, input_ids, attention_mask,
-                           h_prev_list=None):
+                           h_prev_list=None, p_agg_prev=0.0):
         """
         Streaming inference: encode 1 turn mới.
 
@@ -164,11 +183,13 @@ class EarlyExitWeightedModel(nn.Module):
         attention_mask : Tensor [1, L]
         h_prev_list : list of Tensor [d] hoặc None
             Danh sách embeddings các turn trước.
+        p_agg_prev : float
+            Cumulative Noisy-OR probability tính đến turn trước.
 
         Returns
         -------
-        logits : Tensor [C]
-        probs : Tensor [C]
+        q_t : float — evidence probability cho turn hiện tại
+        p_agg : float — cumulative scam probability (Noisy-OR)
         h_t : Tensor [d] — embedding turn mới (để append vào history)
         """
         # Encode turn
@@ -182,18 +203,21 @@ class EarlyExitWeightedModel(nn.Module):
             H_prev = torch.stack(h_prev_list, dim=0)  # [t-1, d]
             c_t = self.cross_attn(h_t, H_prev)
 
-        # Classify
+        # Evidence head
         z_t = torch.cat([h_t, c_t], dim=0)  # [2d]
-        logits = self.classifier(z_t)  # [C]
-        probs = torch.softmax(logits, dim=0)
+        s_t = self.evidence_head(z_t).squeeze(-1)  # scalar
+        q_t = torch.sigmoid(s_t).item()  # float
 
-        return logits, probs, h_t
+        # Online Noisy-OR update
+        p_agg = 1.0 - (1.0 - p_agg_prev) * (1.0 - q_t)
+
+        return q_t, p_agg, h_t
 
     def get_param_groups(self, head_lr: float):
         """
         Tạo param groups. Chỉ bao gồm params có requires_grad = True.
 
-        Khi freeze_encoder=True, chỉ có attention + classifier params.
+        Khi freeze_encoder=True, chỉ có attention + evidence_head params.
         """
         trainable_params = [
             p for p in self.parameters() if p.requires_grad

@@ -1,51 +1,57 @@
 """
-Weighted Cumulative Cross-Entropy Loss (turn-level labels).
+Noisy-OR Loss (dialogue-level supervision).
 
-L = Σ_{t=1..N} w_t * CE(p_t, y_t)
+Gộp per-turn evidence probabilities q_t bằng Noisy-OR:
+    p_dialogue = 1 - ∏_{t=1..T}(1 - q_t)
 
-trong đó:
-  w_t = 2t / N (1-based indexing)
-  N = số turn của hội thoại
-  p_t = predicted logits tại turn t
-  y_t = turn-level label tại turn t (khác nhau mỗi turn)
+Loss:
+    L = BCE(p_dialogue, y_dialogue)
+
+Numerical stability:
+    - Clamp q_t vào [eps, 1-eps]
+    - Tính ở log-space: log_not_p = Σ log(1 - q_t)
 """
 
 import torch
 import torch.nn.functional as F
 
 
-def weighted_cumulative_loss(
-    turn_logits: list,
-    turn_labels: list,
-    N: int,
-) -> torch.Tensor:
+def noisy_or_loss(
+    turn_evidence_probs: list,
+    dialogue_label: torch.Tensor,
+    eps: float = 1e-6,
+) -> tuple:
     """
-    Tính weighted cumulative CE loss cho 1 dialogue với per-turn labels.
+    Tính Noisy-OR loss cho 1 dialogue.
 
     Parameters
     ----------
-    turn_logits : list of Tensor
-        Mỗi phần tử là logits [C] cho 1 turn.
-    turn_labels : list of int or Tensor
-        Label cho từng turn (LEGIT=0, SCAM=1, AMBIGUOUS=2).
-    N : int
-        Tổng số turn thật của dialogue.
+    turn_evidence_probs : list of Tensor (scalar)
+        q_t = sigmoid(s_t) cho từng turn. Mỗi phần tử là scalar tensor.
+    dialogue_label : Tensor (scalar)
+        Nhãn dialogue-level: 0 (harmless) hoặc 1 (scam).
+    eps : float
+        Epsilon cho numerical stability.
 
     Returns
     -------
-    Tensor scalar — weighted loss.
+    loss : Tensor (scalar)
+        BCE loss giữa p_dialogue và y.
+    p_dialogue : Tensor (scalar)
+        Xác suất dialogue-level scam (Noisy-OR aggregated).
     """
-    total_loss = torch.tensor(0.0, device=turn_logits[0].device)
+    # Stack tất cả q_t → [T]
+    q = torch.stack(turn_evidence_probs).clamp(eps, 1 - eps)
 
-    for i, logits_t in enumerate(turn_logits):
-        w = 2.0 * (i + 1) / N
-        label_t = turn_labels[i]
-        if isinstance(label_t, int):
-            label_t = torch.tensor([label_t], device=logits_t.device)
-        elif label_t.dim() == 0:
-            label_t = label_t.unsqueeze(0)
+    # Log-space computation cho numerical stability
+    log_not_p = torch.log1p(-q).sum()
+    p_dialogue = 1.0 - torch.exp(log_not_p)
 
-        ce = F.cross_entropy(logits_t.unsqueeze(0), label_t)
-        total_loss = total_loss + w * ce
+    # Clamp p_dialogue để tránh log(0) trong BCE
+    p_dialogue = p_dialogue.clamp(eps, 1 - eps)
 
-    return total_loss
+    # BCE loss
+    label = dialogue_label.float()
+    loss = F.binary_cross_entropy(p_dialogue.unsqueeze(0), label.unsqueeze(0))
+
+    return loss, p_dialogue
