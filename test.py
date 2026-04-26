@@ -198,12 +198,35 @@ def main():
     if args.verbose:
         print_verbose(model, dataset, device, args.threshold, args.max_verbose)
 
-    # ── Error summary ──
-    preds   = [1 if p >= args.threshold else 0 for p in all_d_probs]
-    errors  = [(i, l, p) for i, (l, p) in enumerate(zip(all_labels, preds)) if l != p]
-    fn = sum(1 for l, p in zip(all_labels, preds) if l == 1 and p == 0)
-    fp = sum(1 for l, p in zip(all_labels, preds) if l == 0 and p == 1)
-    print(f"\n  Errors: {len(errors)} total  (FN={fn} scam bị bỏ sót, FP={fp} harmless báo nhầm)")
+    # ── Error analysis ──
+    preds      = [1 if p >= args.threshold else 0 for p in all_d_probs]
+    fn_indices = [i for i, (l, p) in enumerate(zip(all_labels, preds)) if l == 1 and p == 0]
+    fp_indices = [i for i, (l, p) in enumerate(zip(all_labels, preds)) if l == 0 and p == 1]
+    n_errors   = len(fn_indices) + len(fp_indices)
+
+    print(f"\n  Errors: {n_errors} total  "
+          f"(FN={len(fn_indices)} scam bị bỏ sót, FP={len(fp_indices)} harmless báo nhầm)")
+
+    def _print_error_cases(indices, label_str, limit=10):
+        for i in indices[:limit]:
+            dlg    = dataset.dialogues[i]
+            d_prob = all_d_probs[i]
+            turns  = dlg.get("turns", [])
+            print(
+                f"    [{label_str}] {dlg.get('dialogue_id'):25s}  "
+                f"p={d_prob:.3f}  ({len(turns)} turns)"
+            )
+            for t in turns[:3]:
+                spk = {0: "gọi", 1: "nghe"}.get(t.get("speaker"), "?")
+                print(f"           [{spk}] {t.get('text', '')[:70]}")
+
+    if fn_indices:
+        print(f"\n  ── False Negatives (scam bị bỏ sót, top {min(20, len(fn_indices))}) ──")
+        _print_error_cases(fn_indices, "FN", limit=20)
+
+    if fp_indices:
+        print(f"\n  ── False Positives (harmless báo nhầm, top {min(20, len(fp_indices))}) ──")
+        _print_error_cases(fp_indices, "FP", limit=20)
 
     print("\nDone!")
 
