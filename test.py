@@ -207,18 +207,28 @@ def main():
     print(f"\n  Errors: {n_errors} total  "
           f"(FN={len(fn_indices)} scam bị bỏ sót, FP={len(fp_indices)} harmless báo nhầm)")
 
-    def _print_error_cases(indices, label_str, limit=10):
+    def _print_error_cases(indices, label_str, limit=20):
         for i in indices[:limit]:
-            dlg    = dataset.dialogues[i]
-            d_prob = all_d_probs[i]
-            turns  = dlg.get("turns", [])
+            dlg     = dataset.dialogues[i]
+            d_prob  = all_d_probs[i]
+            t_probs = all_t_probs[i]   # numpy array of per-turn q_t
+            turns   = dlg.get("turns", [])
             print(
-                f"    [{label_str}] {dlg.get('dialogue_id'):25s}  "
-                f"p={d_prob:.3f}  ({len(turns)} turns)"
+                f"\n    [{label_str}] {dlg.get('dialogue_id')}  "
+                f"true={dlg.get('conversation_label')}  "
+                f"p_dialogue={d_prob:.4f}  ({len(turns)} turns)"
             )
-            for t in turns[:3]:
-                spk = {0: "gọi", 1: "nghe"}.get(t.get("speaker"), "?")
-                print(f"           [{spk}] {t.get('text', '')[:70]}")
+            log_comp = 0.0
+            for t_idx, (q, turn) in enumerate(zip(t_probs, turns), 1):
+                q = float(q)
+                log_comp += math.log(max(1.0 - q, 1e-7))
+                p_agg = 1.0 - math.exp(log_comp)
+                alert = " [!]" if p_agg >= args.threshold else ""
+                spk   = {0: "người gọi", 1: "người nghe"}.get(turn.get("speaker"), "?")
+                print(
+                    f"      T{t_idx:<2}: q={q:.4f}  p_agg={p_agg:.4f}{alert}"
+                    f" ({spk}: {turn.get('text', '')})"
+                )
 
     if fn_indices:
         print(f"\n  ── False Negatives (scam bị bỏ sót, top {min(20, len(fn_indices))}) ──")
