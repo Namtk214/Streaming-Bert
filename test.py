@@ -222,11 +222,60 @@ def main():
     # ── Error summary ──
     preds = [1 if p >= args.threshold else 0 for p in all_p_dialogue]
     errors = [(i, l, p) for i, (l, p) in enumerate(zip(all_labels, preds)) if l != p]
-    fn = sum(1 for l, p in zip(all_labels, preds) if l == 1 and p == 0)
-    fp = sum(1 for l, p in zip(all_labels, preds) if l == 0 and p == 1)
-    print(f"\n  Errors: {len(errors)} total  (FN={fn} scam bị bỏ sót, FP={fp} harmless báo nhầm)")
+    fn_indices = [i for i, (l, p) in enumerate(zip(all_labels, preds)) if l == 1 and p == 0]
+    fp_indices = [i for i, (l, p) in enumerate(zip(all_labels, preds)) if l == 0 and p == 1]
+    print(f"\n  Errors: {len(errors)} total  (FN={len(fn_indices)} scam bị bỏ sót, FP={len(fp_indices)} harmless báo nhầm)")
 
-    print("\nDone!")
+    # ── Error case details (20 cases) ──
+    max_error_cases = 20
+    error_cases = []
+
+    # Take up to 10 FN + 10 FP, or fill remaining from the other
+    fn_take = min(len(fn_indices), max_error_cases // 2)
+    fp_take = min(len(fp_indices), max_error_cases - fn_take)
+    fn_take = min(len(fn_indices), max_error_cases - fp_take)  # fill back if FP had fewer
+
+    error_cases += [(i, "FN") for i in fn_indices[:fn_take]]
+    error_cases += [(i, "FP") for i in fp_indices[:fp_take]]
+
+    if error_cases:
+        print(f"\n{'='*65}")
+        print(f"  ERROR CASE DETAILS ({len(error_cases)} cases)")
+        print(f"{'='*65}")
+
+        for case_num, (idx, err_type) in enumerate(error_cases, 1):
+            dlg = dataset.dialogues[idx]
+            true_label = all_labels[idx]
+            p_dlg = all_p_dialogue[idx]
+            q_list = all_turn_q[idx]
+            p_agg_list = all_turn_p_agg[idx]
+
+            true_name = dlg.get("dialogue_label_name", LABEL_NAMES.get(true_label, "?"))
+            pred_name = "scam" if p_dlg >= args.threshold else "harmless"
+            dlg_id = dlg.get("dialogue_id", f"idx-{idx}")
+            turns = dlg.get("turns", [])
+
+            tag = "[FN] Scam bị bỏ sót" if err_type == "FN" else "[FP] Harmless báo nhầm"
+
+            print(f"\n    [{case_num}/{len(error_cases)}] {tag}")
+            print(f"    ID: {dlg_id}  true={true_name}  pred={pred_name}  "
+                  f"p_dialogue={p_dlg:.4f}  ({len(q_list)} turns)")
+
+            for t in range(len(q_list)):
+                q_t = q_list[t]
+                p_agg = p_agg_list[t]
+                alert = " [!]" if p_agg >= args.threshold else ""
+
+                role = "?"
+                text = ""
+                if t < len(turns):
+                    role = turns[t].get("role", "?")
+                    text = turns[t].get("text", turns[t].get("text_segmented", ""))[:50]
+
+                print(f"      T{t+1:<2}: q={q_t:.4f}  p_agg={p_agg:.4f}{alert}"
+                      f" ({role}: {text}...)")
+
+        print(f"\n{'='*65}")
 
 
 if __name__ == "__main__":
