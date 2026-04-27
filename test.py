@@ -1,5 +1,5 @@
 """
-Test Early-Exit Noisy-OR model trên dữ liệu đã convert từ Excel.
+Test Early-Exit Noisy-OR + Weighted Prefix model trên dữ liệu đã convert từ Excel.
 
 Đọc file JSON (output của convert_excel.py), chạy evaluate()
 qua DataLoader, báo cáo đầy đủ metrics dialogue-level + streaming.
@@ -135,7 +135,7 @@ def parse_args():
     default_data = os.path.join(cfg.data_dir, "excel_test.json")
     default_model = os.path.join(cfg.output_dir, "best_model")
 
-    parser = argparse.ArgumentParser(description="Test Early-Exit Noisy-OR on Excel data.")
+    parser = argparse.ArgumentParser(description="Test Early-Exit Noisy-OR + Weighted Prefix on Excel data.")
     parser.add_argument("--data",      default=default_data,
                         help="JSON từ convert_excel.py")
     parser.add_argument("--model",     default=default_model)
@@ -154,7 +154,7 @@ def main():
     args = parse_args()
 
     print("=" * 65)
-    print("EARLY-EXIT NOISY-OR — TEST ON EXCEL DATA")
+    print("EARLY-EXIT NOISY-OR + WEIGHTED PREFIX — TEST ON EXCEL DATA")
     print("=" * 65)
     print(f"  Data:       {args.data}")
     print(f"  Model:      {args.model}")

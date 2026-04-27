@@ -152,9 +152,12 @@ class EarlyExitWeightedModel(nn.Module):
             p_dlg = turn_p_agg[-1] if turn_p_agg else torch.tensor(0.0, device=input_ids.device)
             batch_p_dialogue.append(p_dlg)
 
-            # Noisy-OR loss (per-dialogue)
+            # Noisy-OR + Weighted Prefix loss (per-dialogue)
             if labels is not None:
-                dlg_loss, _ = noisy_or_loss(turn_q, labels[b], eps=eps)
+                dlg_loss, _ = noisy_or_loss(
+                    turn_q, labels[b], eps=eps,
+                    weighted_lambda=self.config.weighted_lambda,
+                )
                 total_loss = total_loss + dlg_loss
 
         # Average loss across batch

@@ -1,5 +1,5 @@
 """
-Configuration cho Baseline2: Early-Exit with Noisy-OR Loss.
+Configuration cho Baseline2: Early-Exit with Noisy-OR + Weighted Prefix Loss.
 
 Kiến trúc:
   turn text → PhoBERT (frozen) → mean pooling → h_t
@@ -7,7 +7,9 @@ Kiến trúc:
   → concat(h_t, c_t) → Linear(2d → 1) → scalar logit s_t
   → q_t = sigmoid(s_t)  (per-turn evidence probability)
   → Noisy-OR aggregation: p_dialogue = 1 - ∏(1 - q_t)
-  → BCE(p_dialogue, y_dialogue)
+
+Loss:
+  L = BCE(p_dialogue, y) + λ × Σ (2t/N) × BCE(p_t_agg, y)
 """
 
 from dataclasses import dataclass, field
@@ -45,6 +47,9 @@ class EarlyExitConfig:
 
     # Noisy-OR numerical stability
     eps: float = 1e-6
+
+    # Weighted prefix auxiliary loss: λ × Σ (2t/N) × BCE(p_t_agg, y)
+    weighted_lambda: float = 0.5
 
     # Optimizer
     head_lr: float = 2e-5

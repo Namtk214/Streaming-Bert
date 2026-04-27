@@ -1,6 +1,6 @@
-# 🛡️ Early-Exit Scam Detection with Noisy-OR Loss
+# 🛡️ Early-Exit Scam Detection with Noisy-OR + Weighted Prefix Loss
 
-**Streaming online scam detector** sử dụng PhoBERT + Cross-Turn Attention + Noisy-OR aggregation.
+**Streaming online scam detector** sử dụng PhoBERT + Cross-Turn Attention + Noisy-OR aggregation + Weighted Prefix auxiliary loss.
 
 Model đưa ra dự đoán **real-time** sau mỗi turn hội thoại, không cần đợi hết cuộc hội thoại.
 
@@ -23,13 +23,20 @@ p_dialogue = 1 − ∏(1 − q_t)
 Loss chỉ cần **1 nhãn binary** ở mức dialogue:
 
 ```
-L = BCE(p_dialogue, y)     — y ∈ {0: harmless, 1: scam}
+L = BCE(p_dialogue, y) + λ × Σ (2t/N) × BCE(p_t_agg, y)
+    ─────────────────   ──────────────────────────────────
+     Main (Noisy-OR)       Weighted Prefix auxiliary
 ```
 
-### Tại sao Noisy-OR?
+- **Main**: BCE trên `p_dialogue` (turn cuối) — supervision dialogue-level
+- **Auxiliary**: BCE trên `p_t_agg` tại mỗi prefix, weight `w_t = 2t/N` tăng tuyến tính
+- `λ = 0.5` (default) — điều chỉnh trong `config.py`
 
-- ❌ **Weighted per-turn CE** (cách cũ): ép mọi turn trong dialogue scam → label scam, gây label noise mạnh ở early turns
-- ✅ **Noisy-OR**: chỉ cần ít nhất 1 turn có evidence mạnh → dialogue được phân loại scam. Supervision sạch hơn nhiều khi chỉ có dialogue-level label
+### Tại sao kết hợp?
+
+- ✅ **Noisy-OR (main)**: chỉ cần ít nhất 1 turn có evidence mạnh → dialogue scam. Supervision sạch, không ép early turns
+- ✅ **Weighted Prefix (auxiliary)**: BCE trên `p_t_agg` tại mỗi prefix → model học predict sớm dần. Weight `2t/N` giúp turn đầu bị phạt nhẹ, turn cuối nặng
+- Kết hợp: Noisy-OR giữ supervision sạch, Weighted Prefix thúc đẩy early detection
 
 ---
 
@@ -41,7 +48,7 @@ Turn text → PhoBERT (frozen) → mean pooling → h_t ∈ R^768
          → concat(h_t, c_t) ∈ R^1536
          → Linear(1536 → 1) → sigmoid → q_t
          → Noisy-OR aggregation → p_dialogue
-         → BCE(p_dialogue, y_dialogue)
+         → L = BCE(p_dialogue, y) + λ × Σ (2t/N) × BCE(p_t_agg, y)
 ```
 
 | Component | Module | Trainable |
@@ -80,10 +87,10 @@ Baseline2/
 │   ├── models/
 │   │   ├── turn_encoder.py        # PhoBERT + mean pooling
 │   │   ├── cross_turn_attention.py # Multi-head cross-turn attention
-│   │   └── early_exit_model.py    # Main model (Noisy-OR)
+│   │   └── early_exit_model.py    # Main model (Noisy-OR + Weighted Prefix)
 │   │
 │   ├── losses/
-│   │   └── weighted_prefix_loss.py # Noisy-OR loss function
+│   │   └── weighted_prefix_loss.py # Noisy-OR + Weighted Prefix loss
 │   │
 │   ├── train.py                   # Training loop
 │   ├── metrics.py                 # Dialogue-level binary metrics
@@ -277,14 +284,15 @@ Output: dialogue-level metrics (F1, AUROC, ...) + streaming metrics (detection d
 | Parameter | Default | Mô tả |
 |-----------|---------|-------|
 | `model_name` | `vinai/phobert-base-v2` | PhoBERT encoder |
-| `max_tokens_per_turn` | 128 | Max tokens mỗi turn |
+| `max_tokens_per_turn` | 256 | Max tokens mỗi turn |
 | `freeze_encoder` | True | Freeze PhoBERT |
 | `attn_num_heads` | 8 | Cross-turn attention heads |
 | `head_lr` | 2e-5 | Learning rate |
-| `batch_size` | 2 | Dialogues per batch |
+| `batch_size` | 4 | Dialogues per batch |
 | `num_epochs` | 15 | Max epochs |
 | `patience` | 5 | Early stopping patience |
 | `eps` | 1e-6 | Noisy-OR numerical stability |
+| `weighted_lambda` | 0.5 | λ cho weighted prefix auxiliary (0 = pure Noisy-OR) |
 
 Chỉnh sửa trong `config.py`.
 
@@ -292,7 +300,9 @@ Chỉnh sửa trong `config.py`.
 
 ## Lưu ý quan trọng
 
-1. **Không supervise `q_t` trực tiếp** — chỉ supervise sau khi gộp thành `p_dialogue` bằng Noisy-OR
-2. **PhoBERT cần word-segmented input** — luôn chạy `prepare_data.py` trước
-3. **Noisy-OR tính ở log-space** — tránh underflow cho dialogue dài: `log_not_p = Σ log(1 − q_t)`
-4. **Luôn clamp `q_t`** vào `[eps, 1−eps]` để tránh `log(0)`
+1. **Main loss supervise `p_dialogue`** — Noisy-OR gộp tất cả `q_t` → 1 số, BCE ở level dialogue
+2. **Auxiliary loss dùng `p_t_agg`** — weighted BCE tại mỗi prefix, thúc đẩy early detection
+3. **PhoBERT cần word-segmented input** — luôn chạy `prepare_data.py` trước
+4. **Noisy-OR tính ở log-space** — tránh underflow cho dialogue dài: `log_not_p = Σ log(1 − q_t)`
+5. **Luôn clamp `q_t`** vào `[eps, 1−eps]` để tránh `log(0)`
+6. **`weighted_lambda=0`** sẽ tắt auxiliary loss, trở về pure Noisy-OR

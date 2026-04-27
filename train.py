@@ -1,5 +1,5 @@
 """
-Training loop cho Baseline2: Early-Exit with Noisy-OR Loss.
+Training loop cho Baseline2: Early-Exit with Noisy-OR + Weighted Prefix Loss.
 
 Chiến lược training:
   - Freeze PhoBERT hoàn toàn
@@ -178,7 +178,7 @@ def train(cfg: EarlyExitConfig = None):
     set_seed(cfg.seed)
 
     print("=" * 60)
-    print("EARLY-EXIT WITH NOISY-OR LOSS – TRAINING")
+    print("EARLY-EXIT WITH NOISY-OR + WEIGHTED PREFIX LOSS – TRAINING")
     print("=" * 60)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -229,6 +229,7 @@ def train(cfg: EarlyExitConfig = None):
     print(f"  Evidence head:    Linear(2×{model.hidden_dim} → 1)")
     print(f"  Attention heads:  {cfg.attn_num_heads}")
     print(f"  Noisy-OR eps:     {cfg.eps}")
+    print(f"  Weighted λ:       {cfg.weighted_lambda}")
 
     # ── 4. Optimizer + Scheduler ──
     total_steps = len(train_loader) * cfg.num_epochs

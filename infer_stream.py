@@ -96,7 +96,7 @@ class EarlyExitInferenceEngine:
 
         print(f"  EarlyExitInferenceEngine loaded on {self.device}")
         print(f"  Threshold: {self.threshold}")
-        print(f"  Loss: Noisy-OR + BCE")
+        print(f"  Loss: Noisy-OR + Weighted Prefix (\u03bb={self.config.weighted_lambda})")
 
     def _preprocess(self, text: str) -> str:
         """Clean + word segment text (bắt buộc cho PhoBERT)."""
